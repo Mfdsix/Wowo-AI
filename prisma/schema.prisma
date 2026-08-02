@@ -1,0 +1,32 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  title     String    @default("New Chat")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  sessionId  String
+  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role       String   // "user" | "assistant"
+  content    String
+  model      String?  // nama model yang dipake (optional)
+  bookmarked Boolean  @default(false)
+  replyToId  String?  // referensi pesan yang di-reply (quote)
+  quoteText  String?  // teks spesifik yang di-quote (highlight)
+  createdAt  DateTime @default(now())
+
+  @@index([sessionId])
+}
