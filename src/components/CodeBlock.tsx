@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Copy, Check, ChevronDown, ChevronRight, Maximize, X, FileCode } from "lucide-react";
+import { Copy, Check, ChevronDown, ChevronRight, Maximize, X, Eye } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import WireframePreview from "./WireframePreview";
 
 const LANGUAGE_MAP: Record<string, string> = {
   js: "javascript",
@@ -57,8 +58,10 @@ export default function CodeBlock({ code, language }: CodeBlockProps) {
   const [collapsed, setCollapsed] = useState(true);
   const [copied, setCopied] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   const lang = language ? LANGUAGE_MAP[language.toLowerCase()] || language.toLowerCase() : "text";
+  const isHtml = (language || "").toLowerCase() === "html";
   const lineCount = code.split("\n").length;
   const isLong = lineCount > PREVIEW_LINES;
 
@@ -129,6 +132,23 @@ export default function CodeBlock({ code, language }: CodeBlockProps) {
                 </>
               )}
             </button>
+
+            {/* Preview — khusus HTML: render di sandbox iframe */}
+            {isHtml && (
+              <button
+                type="button"
+                onClick={() => setShowPreview(true)}
+                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px]
+                           font-mono font-medium text-emerald-400/90 hover:text-emerald-300
+                           hover:bg-zinc-700 transition-colors duration-150"
+                title="Preview HTML"
+              >
+                <span className="text-zinc-500">[</span>
+                <Eye size={12} />
+                <span>PREVIEW</span>
+                <span className="text-zinc-500">]</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -191,6 +211,14 @@ export default function CodeBlock({ code, language }: CodeBlockProps) {
           code={code}
           language={language || "code"}
           onClose={() => setShowModal(false)}
+        />
+      )}
+
+      {/* HTML preview modal */}
+      {showPreview && isHtml && (
+        <WireframePreview
+          html={code}
+          onClose={() => setShowPreview(false)}
         />
       )}
     </>
