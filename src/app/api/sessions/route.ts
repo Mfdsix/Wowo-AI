@@ -8,6 +8,7 @@ export async function GET() {
     select: {
       id: true,
       title: true,
+      designStyle: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },
@@ -21,12 +22,14 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const title = body.title || "New Chat";
+  const designStyle = typeof body.designStyle === "string" ? body.designStyle : null;
 
   const session = await prisma.session.create({
-    data: { title },
+    data: { title, designStyle },
     select: {
       id: true,
       title: true,
+      designStyle: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },

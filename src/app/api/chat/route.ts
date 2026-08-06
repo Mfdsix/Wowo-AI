@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { streamText } from "ai";
+import type { LanguageModelV4ToolCall } from "@ai-sdk/provider";
+import { prisma } from "@/lib/prisma";
+import {
+  connectNeedMCP,
+  fetchDesignSystemBrief,
+  type NeedMCPConnection,
+} from "@/lib/needmcp";
 import {
   analyzeFile,
   AttachmentValidationError,
@@ -13,6 +20,12 @@ export const dynamic = "force-dynamic";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// Deteksi error "model/server gak support function calling" biar bisa retry tanpa tools
+function looksLikeToolError(err: unknown): boolean {
+  const msg = `${(err as Error)?.message ?? ""}`.toLowerCase();
+  return /tool|function/.test(msg);
 }
 
 export async function POST(req: NextRequest) {
@@ -48,6 +61,30 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
+
+  // ─── Parse field designer (multipart) ────────────────────────
+  const designerStr = formData.get("designer");
+  const designer = designerStr === "true" || designerStr === "1";
+
+  let designerContext: {
+    pages?: Array<{ number: number; name: string; html: string }>;
+    activePage?: string | null;
+    activeSection?: string | null;
+    chatHistory?: string[];
+  } | null = null;
+  const dcStr = formData.get("designerContext");
+  if (typeof dcStr === "string" && dcStr.trim()) {
+    try {
+      designerContext = JSON.parse(dcStr);
+    } catch {}
+  }
+
+  const sessionIdVal = formData.get("sessionId");
+  const sessionId =
+    typeof sessionIdVal === "string" && sessionIdVal ? sessionIdVal : null;
+  const designStyleVal = formData.get("designStyle");
+  const designStyle =
+    typeof designStyleVal === "string" && designStyleVal ? designStyleVal : null;
 
   // ─── Parse replyTo (optional) ────────────────────────────────
   const replyToStr = formData.get("replyTo");
@@ -92,7 +129,7 @@ export async function POST(req: NextRequest) {
   }
   const { openai, modelName } = config;
 
-  // ─── Bangun ulang konten pesan user terakhir jadi parts ──────
+  // ─── Bangun ulang konten pesan user terakhir ─────────────────
   const lastIdx = messages.length - 1;
   const last = messages[lastIdx];
   if (!last || last.role !== "user") {
@@ -102,49 +139,240 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const userText = typeof last.content === "string" ? last.content : "";
+  const finalMessages = [...messages];
+
   // Inject reply reference — kasih tau AI bahwa user mereferensi pertanyaan sebelumnya
   const replyPrefix =
     replyTo?.content && typeof replyTo.content === "string" && replyTo.content.trim()
       ? `[User mereferensi pertanyaan sebelumnya: "${replyTo.content}"]\n\n`
       : "";
 
-  const parts = buildUserContentParts({
-    userText: typeof last.content === "string" ? last.content : "",
-    replyPrefix,
-    attachments: analyzed,
-  });
+  // Designer mode: inject canvas state + chat history biar AI paham konteksnya
+  if (designer && designerContext?.pages?.length) {
+    const canvasBlock = designerContext.pages
+      .map(
+        (p) => `Page ${p.number} (${p.name}):\n\`\`\`html\n${p.html}\n\`\`\``
+      )
+      .join("\n\n");
 
-  if (parts.length === 0) {
-    return NextResponse.json({ error: "Pesan kosong" }, { status: 400 });
+    const chatBlock = designerContext.chatHistory?.length
+      ? `\n\n[Recent conversation]\n${designerContext.chatHistory.join("\n")}`
+      : "";
+
+    const activeSection =
+      designerContext?.activeSection && typeof designerContext.activeSection === "string"
+        ? designerContext.activeSection
+        : null;
+
+    const sectionBlock = activeSection
+      ? `\n\n[ACTIVE SECTION — the section the user is currently working on]\n${activeSection}\n` +
+        `If the user's request does NOT name a section, assume they still mean this section and apply the change to it.`
+      : "";
+
+    const contextPrompt =
+      `[CURRENT CANVAS STATE — the pages currently on the designer canvas]\n` +
+      canvasBlock +
+      sectionBlock +
+      chatBlock +
+      `\n\n[USER REQUEST]\n${userText}`;
+
+    finalMessages[lastIdx] = { ...last, content: contextPrompt };
+  } else {
+    // Chat mode: gabung teks user + dokumen + reply reference → parts
+    const parts = buildUserContentParts({
+      userText,
+      replyPrefix,
+      attachments: analyzed,
+    });
+
+    if (parts.length === 0) {
+      return NextResponse.json({ error: "Pesan kosong" }, { status: 400 });
+    }
+
+    finalMessages[lastIdx] = { ...last, content: parts };
   }
 
-  const finalMessages = [...messages];
-  finalMessages[lastIdx] = { ...last, content: parts };
+  // ─── NeedMCP integration ───────────────────────────────────
+  // Style yang lagi di-lock: DB adalah sumber kebenaran, body designStyle cuma hint
+  let lockedStyle: string | null = designStyle;
+  if (process.env.NEEDMCP_API_KEY && sessionId) {
+    try {
+      const s = await prisma.session.findUnique({
+        where: { id: String(sessionId) },
+        select: { designStyle: true },
+      });
+      if (s?.designStyle) lockedStyle = s.designStyle;
+    } catch (err) {
+      console.error("[NeedMCP] read designStyle failed:", errorMessage(err));
+    }
+  }
+
+  // NeedMCP cuma AKTIF kalau ada style yang di-lock (dipilih manual via dropdown)
+  const needsMCP = !!process.env.NEEDMCP_API_KEY && !!lockedStyle;
+
+  // Connect NeedMCP + pre-lock style + pre-fetch design tokens
+  let mcp: NeedMCPConnection | null = null;
+  let tokenBrief: string | null = null;
+  if (needsMCP) {
+    mcp = await connectNeedMCP();
+    if (mcp && lockedStyle) {
+      try {
+        await mcp.client.callTool({
+          name: "select-style-tool",
+          arguments: { selected: lockedStyle },
+        });
+        console.log("[NeedMCP] pre-locked style:", lockedStyle);
+      } catch (err) {
+        console.error("[NeedMCP] pre-lock failed:", errorMessage(err));
+      }
+      tokenBrief = await fetchDesignSystemBrief(mcp.client, lockedStyle);
+      if (tokenBrief) console.log("[NeedMCP] design tokens loaded:", tokenBrief.length, "chars");
+    }
+  }
+
+  // System prompt: guide AI buat generate HTML standalone
+  const INSTRUCTIONS = designer
+    ? "You are a web designer working on a multi-page canvas. " +
+      (designerContext?.activePage
+        ? `The user is currently editing page: ${designerContext.activePage}. `
+        : "") +
+      "The conversation contains the current canvas state (each page's name and full HTML). " +
+      "Use it as context to understand existing pages and what to modify. " +
+      "IMPORTANT: by default, MODIFY the user's currently active page (" +
+      (designerContext?.activePage || "the last page") +
+      ") by adding/changing sections WITHIN its existing HTML structure. " +
+      "ONLY generate a brand-new page if the user EXPLICITLY asks to create/add a new page. " +
+      "Do not create a new page when the user asks to 'add a section', 'tambah section', or modify an existing design. " +
+      "If the user refers to a specific existing page (by 'page N' or its name), generate the COMPLETE updated HTML for THAT page. " +
+      "SECTION-TARGETED EDITS: if the user targets a SPECIFIC section of the page " +
+      "(e.g. 'section hero', 'ubah bagian testimonial', 'edit navbar', or describes a specific heading/text in the page), " +
+      "ONLY modify that one section's HTML. Preserve the rest of the page EXACTLY as-is — " +
+      "keep the <head>, styles, and every other section byte-for-byte unchanged. " +
+      "Surgical edits only; do not restructure, rewrite, or regenerate sections the user did not mention. " +
+      "SECTION CONTINUITY: the conversation may include an '[ACTIVE SECTION]' note. " +
+      "If the user's current request does NOT name a section, they are still referring to that active section — " +
+      "apply the change there, not to the whole page. " +
+      "Follow-up instructions like 'gambarnya nabrak, benerin' continue the previously named section. " +
+      "Based on the user's request, generate ONE complete standalone HTML page (with embedded CSS or Tailwind CDN). " +
+      "Use the Tailwind CSS CDN when useful: " +
+      "<script src=\"https://cdn.tailwindcss.com\"></script> in the <head>. " +
+      "The HTML must render standalone in a browser when opened directly. " +
+      "Output ONLY the HTML inside a single fenced code block (```html ... ```). " +
+      "Do NOT include any explanation, commentary, or additional text before or after the code block."
+    : "You can generate HTML files for the user. Always output your HTML inside a single " +
+      "HTML fenced code block (```html ... ```). " +
+      "You MAY use Tailwind CSS via CDN by including: " +
+      "<script src=\"https://cdn.tailwindcss.com\"></script> in the <head>. " +
+      "The HTML must render standalone in a browser when opened directly. " +
+      "Do NOT write any JavaScript besides the Tailwind CDN script. " +
+      "IMPORTANT — follow the user's intent exactly: " +
+      "If the user asks to BUILD/CREATE/MAKE a landing page, website, or UI design, " +
+      "output a COMPLETE, fully-styled, production-ready page with real content, colors, typography, and layout " +
+      "(NOT a wireframe). " +
+      "Only output a wireframe mockup (light gray boxes, dashed borders, placeholder labels like Navbar/Hero/Features/Footer) " +
+      "if the user EXPLICITLY asks for a WIREFRAME or MOCKUP.";
+
+  // Tambahan guidance MCP: dikasih ke model cuma kalo tools-nya aktif
+  const MCP_GUIDE = needsMCP
+    ? "\n\nYou have access to NeedMCP design tools: get-styles-tool, get-design-system-tool, get-style-tokens-tool, " +
+      "get-components-tool, get-layouts-tool, get-wireframes-tool, get-wireframe-tool, select-style-tool, send-feedback-tool. " +
+      `Currently locked style: ${lockedStyle ?? "none"}. ` +
+      "IMPORTANT: tool names use DASHES, not underscores (e.g. get-design-system-tool, get-style-tokens-tool). " +
+      "Discover available styles with get-styles-tool first (slugs look like the locked style, e.g. a brand slug). " +
+      "Use get-design-system-tool, get-style-tokens-tool, and get-components-tool (passing the locked styleSlug) " +
+      "to ground colors, typography, spacing, and components — never invent design tokens. " +
+      "Use get-wireframe-tool / get-layouts-tool for layout/structure references when the user asks for a wireframe or structure. " +
+      "To change the design language, call select-style-tool({ selected: <slug> }) first; the choice is saved. " +
+      "Keep the existing output rules (single ```html block)." +
+      (tokenBrief
+        ? `\n\n[LOCKED STYLE DESIGN TOKENS — use these EXACT values for colors, typography, spacing, and radii]\n${tokenBrief}`
+        : "")
+    : "";
+  const INSTRUCTIONS_MCP = INSTRUCTIONS + MCP_GUIDE;
 
   // ─── Stream response dari LLM ────────────────────────────────
   try {
-    const result = streamText({
-      model: openai.chat(modelName),
-      messages: finalMessages,
-      maxRetries: 0,
-    });
+    // Kalau model milih style lain via select-style-tool, simpan ke session
+    const onStepEnd = async (event: {
+      toolCalls?: Array<{ toolName?: string; input?: unknown }>;
+    }) => {
+      try {
+        const sel = event.toolCalls?.find(
+          (tc) => tc.toolName === "select-style-tool"
+        );
+        const selected = (sel?.input as { selected?: string } | undefined)?.selected;
+        if (selected && sessionId && selected !== lockedStyle) {
+          await prisma.session.update({
+            where: { id: String(sessionId) },
+            data: { designStyle: String(selected) },
+          });
+          lockedStyle = selected;
+          console.log("[NeedMCP] persisted style:", lockedStyle);
+        }
+      } catch (err) {
+        console.error("[NeedMCP] persist style failed:", errorMessage(err));
+      }
+    };
 
-    // Ambil stream aslinya dulu biar error-nya ketangkep
-    const textStream = result.textStream;
-    if (!textStream) {
-      return NextResponse.json(
-        { error: "Gagal bikin stream dari LLM" },
-        { status: 502 }
-      );
-    }
+    // Beberapa model hallucinate nama tool (underscore vs dash), e.g. get_style_tokens_tool.
+    // Kalau tool gak ketemu, repair nama-nya ke bentuk dash biar tool-nya tetep kejalanin.
+    const repairToolCall = async (options: {
+      toolCall: LanguageModelV4ToolCall;
+      tools: Record<string, unknown>;
+    }): Promise<LanguageModelV4ToolCall | null> => {
+      const { toolCall, tools } = options;
+      const corrected = toolCall.toolName.replace(/_/g, "-");
+      if (corrected && corrected !== toolCall.toolName && tools[corrected]) {
+        console.log("[NeedMCP] repaired tool name:", toolCall.toolName, "→", corrected);
+        return { ...toolCall, toolName: corrected };
+      }
+      return null;
+    };
+
+    // Tools aktif → INSTRUCTIONS_MCP + tools; kaga → INSTRUCTIONS polos (behavior lama)
+    const buildStream = (useTools: boolean) =>
+      streamText({
+        model: openai.chat(modelName),
+        messages: finalMessages,
+        instructions: useTools ? INSTRUCTIONS_MCP : INSTRUCTIONS,
+        tools: useTools && mcp ? mcp.tools : undefined,
+        maxRetries: 0,
+        abortSignal: req.signal,
+        ...(useTools && mcp ? { onStepEnd, repairToolCall } : {}),
+      });
 
     // Convert stream async iterator ke ReadableStream,
     // plus error handling biar error apapun kaga tembus ke client
     const readableStream = new ReadableStream({
       async start(controller) {
+        let attemptTools = !!mcp;
+        let emittedAny = false;
         try {
-          for await (const chunk of textStream) {
-            controller.enqueue(new TextEncoder().encode(chunk));
+          while (true) {
+            try {
+              const result = buildStream(attemptTools);
+              for await (const chunk of result.textStream) {
+                emittedAny = true;
+                controller.enqueue(new TextEncoder().encode(chunk));
+              }
+            } catch (err) {
+              // Model/server gak support function calling → retry sekali tanpa tools
+              if (attemptTools && !emittedAny && looksLikeToolError(err)) {
+                console.error("[NeedMCP] tools unsupported, retrying without:", errorMessage(err));
+                attemptTools = false;
+                continue;
+              }
+              throw err;
+            }
+
+            // Stream kelar tapi gak ada teks sama sekali pas tools aktif
+            if (attemptTools && !emittedAny) {
+              console.error("[NeedMCP] empty stream with tools, retrying without");
+              attemptTools = false;
+              continue;
+            }
+            break;
           }
         } catch (err) {
           console.error("LLM stream error:", err);
@@ -164,8 +392,13 @@ export async function POST(req: NextRequest) {
           );
         } finally {
           // Stream harus ditutup biar client gak nunggu forever
+          try { await mcp?.close(); } catch {}
           try { controller.close(); } catch {}
         }
+      },
+      cancel() {
+        // Client abort mid-stream → teardown MCP session
+        void mcp?.close();
       },
     });
 
