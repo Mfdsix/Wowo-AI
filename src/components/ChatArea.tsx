@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft } from "lucide-react";
+import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
@@ -51,9 +51,10 @@ type ChatAreaProps = {
   onToggleBookmarkAction?: (messageId: string) => void;
   onReplyAction?: (message: Message) => void;
   onQuoteAction?: (text: string, messageId: string) => void;
+  onOpenInDesignerAction?: (content: string) => void;
 };
 
-export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction }: ChatAreaProps) {
+export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction, onOpenInDesignerAction }: ChatAreaProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeBookmarkId, setActiveBookmarkId] = useState<string | null>(null);
@@ -168,6 +169,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
               onRegenerateAction={onRegenerateAction}
               onToggleBookmarkAction={onToggleBookmarkAction}
               onReplyAction={onReplyAction}
+              onOpenInDesignerAction={onOpenInDesignerAction}
             />
           );
         })}
@@ -219,9 +221,10 @@ type MessageBubbleProps = {
   onRegenerateAction?: () => void;
   onToggleBookmarkAction?: (messageId: string) => void;
   onReplyAction?: (message: Message) => void;
+  onOpenInDesignerAction?: (content: string) => void;
 };
 
-function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction }: MessageBubbleProps) {
+function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onOpenInDesignerAction }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -347,9 +350,23 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
         </div>
       )}
 
-      {/* Action buttons — assistant messages: copy + regenerate */}
+      {/* Action buttons — assistant messages: copy + open in designer + regenerate */}
       {!isUser && !isStreaming && (
         <div className="flex items-center gap-1 px-4 pb-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+          {/* Open in Designer — kalo message ada code block html */}
+          {message.content.includes("```html") && onOpenInDesignerAction && (
+            <button
+              onClick={() => onOpenInDesignerAction?.(message.content)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs
+                         text-indigo-400 hover:text-indigo-200 hover:bg-indigo-600/20
+                         transition-colors duration-150"
+              title="Open this HTML in Designer mode"
+            >
+              <LayoutDashboard size={14} />
+              <span>Open in Designer</span>
+            </button>
+          )}
+
           {/* Copy */}
           <button
             onClick={handleCopy}

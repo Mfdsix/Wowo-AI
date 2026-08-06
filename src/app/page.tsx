@@ -1,13 +1,17 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { LayoutDashboard, MessagesSquare } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput from "@/components/MessageInput";
+import DesignerCanvas from "@/components/DesignerCanvas";
+import DesignerPrompt from "@/components/DesignerPrompt";
 
 type Session = {
   id: string;
   title: string;
+  designStyle?: string | null;
   createdAt: string;
   updatedAt: string;
   _count: { messages: number };
@@ -32,6 +36,55 @@ type ReplyTarget = {
   quoteText?: string;
 };
 
+type DesignerPage = {
+  id: string;
+  name: string;
+  html: string;
+  versions?: { id: string; html: string; updatedAt: string }[];
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+// Deteksi section yang di-mention user dari prompt + keyword di HTML page.
+// Kalau gak ketemu, balikin fallback (section terakhir yang aktif) biar
+// follow-up kayak "gambarnya nabrak, benerin" otomatis ngarah ke section yang sama.
+function detectSection(prompt: string, pageHtml: string, fallback: string | null): string | null {
+  const lowerPrompt = prompt.toLowerCase();
+
+  // Kumpulin keyword section dari HTML: class, id, heading
+  const keywords = new Set<string>();
+  const classIdRegex = /\b(?:class|id)="([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = classIdRegex.exec(pageHtml))) {
+    m[1].split(/\s+/).forEach((w) => {
+      const clean = w.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (clean.length > 2) keywords.add(clean);
+    });
+  }
+  const headingRegex = /<h[1-3][^>]*>([^<]+)<\/h[1-3]>/g;
+  while ((m = headingRegex.exec(pageHtml))) {
+    m[1].trim().toLowerCase().split(/\s+/).forEach((w) => {
+      const clean = w.replace(/[^a-z0-9]/g, "");
+      if (clean.length > 3) keywords.add(clean);
+    });
+  }
+
+  // Common section names — prioritas tinggi
+  const common = [
+    "hero", "navbar", "nav", "header", "footer", "banner", "sidebar",
+    "about", "testimonial", "gallery", "contact", "features", "feature",
+    "pricing", "price", "faq", "cta", "services", "service", "team",
+  ];
+  for (const k of common) {
+    if (lowerPrompt.includes(k)) return k;
+  }
+  // Keyword dari HTML page
+  for (const k of keywords) {
+    if (lowerPrompt.includes(k)) return k;
+  }
+  return fallback;
+}
+
 export default function Home() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -40,7 +93,17 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [viewMode, setViewMode] = useState<"chat" | "designer">("chat");
+  const [designerPages, setDesignerPages] = useState<DesignerPage[]>([]);
+  const [activePageId, setActivePageId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [isDesignerLoading, setIsDesignerLoading] = useState(false);
+  const [styles, setStyles] = useState<{ slug: string; name: string }[]>([]);
+  const [lastAppliedStyle, setLastAppliedStyle] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Ref ke handleDesignerSubmit biar bisa dipanggil dari handleStyleChange
+  // (yang dideklarasi lebih dulu — hindari "used before declaration")
+  const designerSubmitRef = useRef<((prompt: string) => Promise<void>) | null>(null);
 
   // ─── Fetch all sessions ────────────────────────────────────
   const fetchSessions = useCallback(async () => {
@@ -102,15 +165,33 @@ export default function Home() {
   );
 
   // ─── Update session title from first message ────────────────
+  // ─── Update title session (auto-title & rename) ────────────
   const updateSessionTitle = useCallback(
-    async (sessionId: string, userContent: string) => {
-      const title =
-        userContent.slice(0, 40) + (userContent.length > 40 ? "..." : "");
+    async (sessionId: string, title: string) => {
+      // Optimistic update
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, title } : s))
       );
+      // Persist ke DB
+      try {
+        await fetch(`/api/sessions/${sessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title }),
+        });
+      } catch (err) {
+        console.error("updateSessionTitle error:", err);
+      }
     },
     []
+  );
+
+  // ─── Rename chat manual (dari sidebar) ──────────────────────
+  const handleRenameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      await updateSessionTitle(sessionId, title);
+    },
+    [updateSessionTitle]
   );
 
   // ─── Init: load sessions, auto-create if empty ──────────────
@@ -225,8 +306,10 @@ export default function Home() {
     setMessages((prev) => [...prev, tempUserMsg]);
     setIsLoading(true);
 
-    // 2. Save user message to DB
-    await saveMessage(
+    // 2. Save user message ke DB, lalu ganti placeholder temp- dengan pesan asli
+    // (penting biar history state cuma punya id real — kalau gak, pesan user
+    //  selalu ke-filter dan AI kehilangan konteks pertanyaan sebelumnya)
+    const savedUserMsg = await saveMessage(
       activeSessionId,
       "user",
       userContent,
@@ -234,11 +317,23 @@ export default function Home() {
       activeReply?.id || null,
       activeReply?.quoteText || null
     );
+    if (savedUserMsg) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempUserMsg.id ? savedUserMsg : m))
+      );
+    }
 
-    // 3. Auto-title: set session title from first user message
-    const currentMessages = messages.filter((m) => !m.id.startsWith("temp-"));
+    // 3. Auto-title: set session title dari pesan user pertama
+    const currentMessages = messages.filter(
+      (m) =>
+        !m.id.startsWith("temp-") &&
+        !m.id.startsWith("assist-") &&
+        !m.id.startsWith("error-")
+    );
     if (currentMessages.length === 0) {
-      updateSessionTitle(activeSessionId, userContent);
+      const autoTitle =
+        userContent.slice(0, 40) + (userContent.length > 40 ? "..." : "");
+      updateSessionTitle(activeSessionId, autoTitle);
     }
 
     // 4. Stream response from LLM
@@ -251,9 +346,18 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [
-            ...messages.filter((m) => !m.id.startsWith("temp-")),
+            // Cuma kirim pesan real (bukan placeholder temp/assist/error)
+            ...messages.filter(
+              (m) =>
+                !m.id.startsWith("temp-") &&
+                !m.id.startsWith("assist-") &&
+                !m.id.startsWith("error-")
+            ),
             { role: "user" as const, content: userContent },
           ],
+          sessionId: activeSessionId,
+          designStyle:
+            sessions.find((s) => s.id === activeSessionId)?.designStyle ?? null,
           // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
           // Quote → pake teks yang di-highlight; Reply → pake isi pesan
           replyTo: activeReply
@@ -299,17 +403,31 @@ export default function Home() {
         );
       }
 
-      // 6. Save assistant message to DB
+      // 6. Save assistant message ke DB, ganti placeholder assist- dengan pesan asli
       if (assistantContent) {
-        await saveMessage(activeSessionId, "assistant", assistantContent);
+        const savedAssistantMsg = await saveMessage(
+          activeSessionId,
+          "assistant",
+          assistantContent
+        );
+        if (savedAssistantMsg) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? savedAssistantMsg : m))
+          );
+        }
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") {
         console.log("Generation stopped by user");
-        // Save partial content if any
+        // Save partial content & ganti placeholder dengan pesan asli
         const partialMsg = messages.find((m) => m.id.startsWith("assist-"));
         if (partialMsg?.content) {
-          await saveMessage(activeSessionId, "assistant", partialMsg.content);
+          const saved = await saveMessage(activeSessionId, "assistant", partialMsg.content);
+          if (saved) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === partialMsg.id ? saved : m))
+            );
+          }
         }
       } else {
         console.error("handleSubmit error:", err);
@@ -328,7 +446,7 @@ export default function Home() {
       abortRef.current = null;
       fetchSessions();
     }
-  }, [input, activeSessionId, isLoading, messages, replyTarget, saveMessage, updateSessionTitle, fetchSessions]);
+  }, [input, activeSessionId, isLoading, messages, replyTarget, sessions, saveMessage, updateSessionTitle, fetchSessions]);
 
   // ─── Regenerate response ──────────────────────────────────
   const handleRegenerate = useCallback(async () => {
@@ -386,6 +504,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [...historyForApi, { role: "user" as const, content: lastUserContent }],
+          sessionId: activeSessionId,
+          designStyle:
+            sessions.find((s) => s.id === activeSessionId)?.designStyle ?? null,
         }),
         signal: abortController.signal,
       });
@@ -440,7 +561,7 @@ export default function Home() {
       abortRef.current = null;
       fetchSessions();
     }
-  }, [activeSessionId, isLoading, messages, saveMessage, fetchSessions]);
+  }, [activeSessionId, isLoading, messages, sessions, saveMessage, fetchSessions]);
 
   // ─── Stop generation ────────────────────────────────────────
   const handleStop = useCallback(() => {
@@ -513,38 +634,432 @@ export default function Home() {
     }, 50);
   }, [messages]);
 
+  // ─── Designer: fetch pages utk session ─────────────────────
+  const fetchDesignerPages = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/designer-pages`);
+      if (!res.ok) throw new Error("Failed to fetch designer pages");
+      const data: DesignerPage[] = await res.json();
+      setDesignerPages(data);
+    } catch (err) {
+      console.error("fetchDesignerPages error:", err);
+    }
+  }, []);
+
+  // Load designer pages pas masuk designer mode / ganti session
+  useEffect(() => {
+    if (viewMode === "designer" && activeSessionId) {
+      fetchDesignerPages(activeSessionId);
+    }
+  }, [viewMode, activeSessionId, fetchDesignerPages]);
+
+  // Fetch NeedMCP styles buat style picker (cuma pas masuk designer mode)
+  useEffect(() => {
+    if (viewMode !== "designer") return;
+    let cancelled = false;
+    fetch("/api/needmcp/styles")
+      .then((r) => (r.ok ? r.json() : { styles: [] }))
+      .then((d) => {
+        if (!cancelled) setStyles(d.styles ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setStyles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode]);
+
+  // ─── Style picker (NeedMCP) — ONE-SHOT apply ────────────────
+  // Ganti style = apply style SEKALI ke page aktif, terus balik ke
+  // bawaan wowo.ai buat prompt lanjutan. Style terakhir di-track sbg history.
+  const handleStyleChange = useCallback(
+    async (slug: string | null) => {
+      if (!activeSessionId) return;
+
+      // Case: user pilih "Default" → unlock & hapus history
+      if (!slug) {
+        setLastAppliedStyle(null);
+        try {
+          await fetch(`/api/sessions/${activeSessionId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ designStyle: "" }),
+          });
+        } catch (err) {
+          console.error("handleStyleChange unlock error:", err);
+        }
+        return;
+      }
+
+      // 1. Lock style sementara (biar request apply pake NeedMCP)
+      try {
+        await fetch(`/api/sessions/${activeSessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ designStyle: slug }),
+        });
+        // Update state biar handleDesignerSubmit kirim designStyle yg bener
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === activeSessionId ? { ...s, designStyle: slug } : s
+          )
+        );
+      } catch (err) {
+        console.error("handleStyleChange lock error:", err);
+      }
+
+      // 2. Auto-apply: prompt AI terapkan style ke page aktif
+      const styleName = styles.find((s) => s.slug === slug)?.name || slug;
+      const target =
+        designerPages.find((p) => p.id === activePageId) ||
+        designerPages[designerPages.length - 1];
+      if (target) {
+        await designerSubmitRef.current?.(
+          `Terapkan design style "${styleName}" ke page ini secara konsisten. ` +
+            `Pertahankan konten & struktur page, tapi ganti warna, typography, spacing, dan komponen ` +
+            `sesuai design system style "${styleName}". Jangan bikin page baru.`
+        );
+      }
+
+      // 3. Unlock style → prompt lanjutan balik ke bawaan wowo.ai
+      try {
+        await fetch(`/api/sessions/${activeSessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ designStyle: "" }),
+        });
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === activeSessionId ? { ...s, designStyle: null } : s
+          )
+        );
+      } catch (err) {
+        console.error("handleStyleChange unlock error:", err);
+      }
+
+      // 4. Catat history style terakhir
+      setLastAppliedStyle(slug);
+    },
+    [activeSessionId, styles, designerPages, activePageId]
+  );
+
+  // ─── Designer: rename page ─────────────────────────────────
+  const handleRenameDesignerPage = useCallback(
+    async (pageId: string, name: string) => {
+      if (!activeSessionId) return;
+      // Optimistic
+      setDesignerPages((prev) =>
+        prev.map((p) => (p.id === pageId ? { ...p, name } : p))
+      );
+      try {
+        await fetch(`/api/sessions/${activeSessionId}/designer-pages/${pageId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+      } catch (err) {
+        console.error("handleRenameDesignerPage error:", err);
+      }
+    },
+    [activeSessionId]
+  );
+
+  // ─── Designer: delete page ─────────────────────────────────
+  const handleDeleteDesignerPage = useCallback(
+    async (pageId: string) => {
+      if (!activeSessionId) return;
+      setDesignerPages((prev) => prev.filter((p) => p.id !== pageId));
+      try {
+        await fetch(`/api/sessions/${activeSessionId}/designer-pages/${pageId}`, {
+          method: "DELETE",
+        });
+      } catch (err) {
+        console.error("handleDeleteDesignerPage error:", err);
+      }
+    },
+    [activeSessionId]
+  );
+
+  // ─── Designer: revert page ke versi tertentu ──────────────
+  const handleRevertPage = useCallback(
+    async (pageId: string, versionId: string) => {
+      if (!activeSessionId) return;
+      try {
+        const res = await fetch(
+          `/api/sessions/${activeSessionId}/designer-pages/${pageId}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ revertToVersionId: versionId }),
+          }
+        );
+        if (res.ok) {
+          const updated: DesignerPage = await res.json();
+          setDesignerPages((prev) =>
+            prev.map((p) => (p.id === pageId ? updated : p))
+          );
+        }
+      } catch (err) {
+        console.error("handleRevertPage error:", err);
+      }
+    },
+    [activeSessionId]
+  );
+
+  // ─── Designer: open dari chat (HTML message → jadi page) ──
+  const handleOpenInDesigner = useCallback(
+    async (content: string) => {
+      setViewMode("designer");
+      if (!activeSessionId) return;
+
+      const htmlMatch = content.match(/```html\s*([\s\S]*?)```/);
+      const html = htmlMatch ? htmlMatch[1].trim() : "";
+      if (!html) return;
+
+      try {
+        const res = await fetch(`/api/sessions/${activeSessionId}/designer-pages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ html }),
+        });
+        if (res.ok) {
+          const page: DesignerPage = await res.json();
+          setDesignerPages((prev) => [...prev, page]);
+        }
+      } catch (err) {
+        console.error("handleOpenInDesigner error:", err);
+      }
+    },
+    [activeSessionId]
+  );
+
+  // ─── Designer: generate page dari prompt ───────────────────
+  const handleDesignerSubmit = useCallback(
+    async (prompt: string) => {
+      const trimmed = prompt.trim();
+      if (!trimmed || !activeSessionId || isDesignerLoading) return;
+
+      setIsDesignerLoading(true);
+      const abortController = new AbortController();
+      abortRef.current = abortController;
+
+      // Tentukan target page.
+      // Aturan: default MODIFIKASI page yang lagi aktif/terakhir,
+      // KECUALI user eksplisit minta page baru / referensi page lain.
+      const lower = trimmed.toLowerCase();
+      const wantsNewPage = /tambah\s+page|page\s+baru|bikin\s+page\s+baru|buat\s+page\s+baru|new\s+page|add\s+page|halaman\s+baru/.test(lower);
+
+      let targetPage: DesignerPage | null = null;
+
+      // 1. Referensi eksplisit "page N"
+      const numMatch = trimmed.match(/page\s*(\d+)/i);
+      if (numMatch) {
+        const idx = parseInt(numMatch[1], 10) - 1;
+        if (designerPages[idx]) targetPage = designerPages[idx];
+      }
+
+      // 2. Referensi nama page
+      if (!targetPage && !wantsNewPage) {
+        targetPage =
+          designerPages.find((p) => lower.includes(p.name.toLowerCase())) || null;
+      }
+
+      // 3. Default: page aktif / page terakhir (modifikasi, bukan bikin baru)
+      if (!targetPage && !wantsNewPage && designerPages.length > 0) {
+        targetPage =
+          designerPages.find((p) => p.id === activePageId) ||
+          designerPages[designerPages.length - 1];
+      }
+
+      // Deteksi section yang di-mention → inget buat follow-up berikutnya
+      const nextActiveSection = detectSection(
+        trimmed,
+        targetPage?.html || "",
+        activeSection
+      );
+      if (nextActiveSection) setActiveSection(nextActiveSection);
+
+      try {
+        // Konteks kaya: semua page + HTML-nya + chat history
+        // (biar AI paham apa yang lagi ada di canvas & konteks percakapan)
+        const recentChat = messages
+          .filter((m) => !m.id.startsWith("temp-") && !m.id.startsWith("assist-"))
+          .slice(-10)
+          .map((m) => `${m.role}: ${m.content.slice(0, 500)}`);
+
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [{ role: "user" as const, content: trimmed }],
+            sessionId: activeSessionId,
+            designStyle:
+              sessions.find((s) => s.id === activeSessionId)?.designStyle ?? null,
+            designer: true,
+            designerContext: {
+              pages: designerPages.map((p, i) => ({
+                number: i + 1,
+                name: p.name,
+                html: p.html,
+              })),
+              activePage: targetPage?.name || null,
+              activeSection: nextActiveSection || null,
+              chatHistory: recentChat,
+            },
+          }),
+          signal: abortController.signal,
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response body");
+
+        const decoder = new TextDecoder();
+        let fullText = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          fullText += decoder.decode(value, { stream: true });
+        }
+
+        // Extract HTML dari code block
+        const htmlMatch = fullText.match(/```html\s*([\s\S]*?)```/);
+        const html = htmlMatch ? htmlMatch[1].trim() : fullText.trim();
+
+        if (!html) throw new Error("AI gak ngasih HTML");
+
+        if (targetPage) {
+          // Update page yang di-target
+          const res2 = await fetch(
+            `/api/sessions/${activeSessionId}/designer-pages/${targetPage.id}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ html }),
+            }
+          );
+          if (res2.ok) {
+            const updated: DesignerPage = await res2.json();
+            setDesignerPages((prev) =>
+              prev.map((p) => (p.id === updated.id ? updated : p))
+            );
+          }
+        } else {
+          // Bikin page baru
+          const res2 = await fetch(`/api/sessions/${activeSessionId}/designer-pages`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ html }),
+          });
+          if (res2.ok) {
+            const page: DesignerPage = await res2.json();
+            setDesignerPages((prev) => [...prev, page]);
+            setActivePageId(page.id);
+          }
+        }
+      } catch (err: unknown) {
+        console.error("handleDesignerSubmit error:", err);
+      } finally {
+        setIsDesignerLoading(false);
+        abortRef.current = null;
+      }
+    },
+    [activeSessionId, isDesignerLoading, designerPages, activePageId, sessions]
+  );
+  designerSubmitRef.current = handleDesignerSubmit;
+
   return (
-    <div className="flex h-screen bg-zinc-900">
-      <Sidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        isLoading={isSessionsLoading}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        onDeleteSession={handleDeleteSession}
-      />
-
-      <main className="flex-1 flex flex-col min-w-0">
-        <ChatArea
-          messages={messages}
-          isLoading={isLoading}
-          sessionId={activeSessionId}
-          onRegenerateAction={handleRegenerate}
-          onToggleBookmarkAction={toggleBookmark}
-          onReplyAction={handleReply}
-          onQuoteAction={handleQuote}
+    <div className="flex h-screen overflow-hidden bg-zinc-900">
+      {/* Sidebar cuma di chat mode — designer auto fullscreen */}
+      {viewMode === "chat" && (
+        <Sidebar
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          isLoading={isSessionsLoading}
+          onSelectSession={handleSelectSession}
+          onNewSession={handleNewSession}
+          onDeleteSession={handleDeleteSession}
+          onRenameSession={handleRenameSession}
         />
+      )}
 
-        <MessageInput
-          input={input}
-          isLoading={isLoading}
-          sessionId={activeSessionId}
-          onInputChange={setInput}
-          onSubmit={handleSubmit}
-          onStop={handleStop}
-          replyTarget={replyTarget}
-          onClearReply={() => setReplyTarget(null)}
-        />
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* View toggle: Chat | Designer */}
+        <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
+          <button
+            onClick={() => setViewMode("chat")}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              viewMode === "chat"
+                ? "bg-zinc-800 text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+            }`}
+          >
+            <MessagesSquare size={14} />
+            Chat
+          </button>
+          <button
+            onClick={() => setViewMode("designer")}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              viewMode === "designer"
+                ? "bg-indigo-600 text-white"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+            }`}
+          >
+            <LayoutDashboard size={14} />
+            Designer
+          </button>
+        </div>
+
+        {viewMode === "chat" ? (
+          <>
+            <ChatArea
+              messages={messages}
+              isLoading={isLoading}
+              sessionId={activeSessionId}
+              onRegenerateAction={handleRegenerate}
+              onToggleBookmarkAction={toggleBookmark}
+              onReplyAction={handleReply}
+              onQuoteAction={handleQuote}
+              onOpenInDesignerAction={handleOpenInDesigner}
+            />
+
+            <MessageInput
+              input={input}
+              isLoading={isLoading}
+              sessionId={activeSessionId}
+              onInputChange={setInput}
+              onSubmit={handleSubmit}
+              onStop={handleStop}
+              replyTarget={replyTarget}
+              onClearReply={() => setReplyTarget(null)}
+            />
+          </>
+        ) : (
+          <>
+            <DesignerCanvas
+              pages={designerPages}
+              isLoading={isDesignerLoading}
+              selectedPageId={activePageId}
+              onSelectPage={setActivePageId}
+              onRenamePage={handleRenameDesignerPage}
+              onDeletePage={handleDeleteDesignerPage}
+              onRevertPage={handleRevertPage}
+              styles={styles}
+              lockedStyle={lastAppliedStyle}
+              onStyleChange={handleStyleChange}
+            />
+
+            <DesignerPrompt
+              onSubmit={handleDesignerSubmit}
+              isLoading={isDesignerLoading}
+            />
+          </>
+        )}
       </main>
     </div>
   );

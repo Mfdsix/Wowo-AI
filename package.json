@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/mcp": "^2.0.22",
     "@ai-sdk/openai": "^4.0.24",
     "@prisma/client": "^6.19.3",
     "@types/react-syntax-highlighter": "^15.5.13",
@@ -31,5 +32,8 @@
     "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "@ai-sdk/provider-utils": "5.0.18"
   }
 }
