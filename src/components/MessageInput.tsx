@@ -1,37 +1,51 @@
 "use client";
 
-import { useRef, useEffect, KeyboardEvent } from "react";
-import { Send, Square, X, CornerUpLeft } from "lucide-react";
+import { useRef, useEffect, KeyboardEvent, ChangeEvent } from "react";
+import { Send, Square, X, CornerUpLeft, Paperclip, FileText, Image } from "lucide-react";
+import type { ReplyTarget } from "@/lib/types";
 
-type ReplyTarget = {
+// File yang lagi menunggu dikirim (belum di-persist)
+export type PendingFile = {
   id: string;
-  content: string;
-  role?: string;
-  quoteText?: string;
+  file: File;
+  previewUrl?: string; // object URL — cuma untuk gambar
 };
 
 type MessageInputProps = {
   input: string;
   isLoading: boolean;
   sessionId: string | null;
+  pendingFiles: PendingFile[];
   onInputChange: (value: string) => void;
+  onAddFiles: (fileList: FileList | File[]) => void;
+  onRemoveFile: (id: string) => void;
   onSubmit: () => void;
   onStop: () => void;
   replyTarget?: ReplyTarget | null;
   onClearReply?: () => void;
 };
 
+const formatSize = (bytes: number) => {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+};
+
 export default function MessageInput({
   input,
   isLoading,
   sessionId,
+  pendingFiles,
   onInputChange,
+  onAddFiles,
+  onRemoveFile,
   onSubmit,
   onStop,
   replyTarget,
   onClearReply,
 }: MessageInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -54,6 +68,17 @@ export default function MessageInput({
       handleSubmit();
     }
   };
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      onAddFiles(e.target.files);
+    }
+    // Reset biar file yang sama bisa di-attach lagi
+    e.target.value = "";
+  };
+
+  const canSend = !isLoading && sessionId && (input.trim() !== "" || pendingFiles.length > 0);
+  const disabled = !sessionId || isLoading;
 
   const preview = (text: string) => {
     const clean = text.replace(/[#*`>_~]/g, "").trim();
@@ -86,6 +111,42 @@ export default function MessageInput({
           </div>
         )}
 
+        {/* Pending files chips — file yang bakal dikirim */}
+        {pendingFiles.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {pendingFiles.map((f) => (
+              <div
+                key={f.id}
+                className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5"
+              >
+                {f.previewUrl ? (
+                  <img
+                    src={f.previewUrl}
+                    alt={f.file.name}
+                    className="w-8 h-8 object-cover rounded shrink-0"
+                  />
+                ) : f.file.type.startsWith("image/") ? (
+                  <Image size={16} className="text-zinc-400 shrink-0" />
+                ) : (
+                  <FileText size={16} className="text-zinc-400 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs text-zinc-300 truncate max-w-[140px]">{f.file.name}</p>
+                  <p className="text-[10px] text-zinc-500">{formatSize(f.file.size)}</p>
+                </div>
+                <button
+                  onClick={() => onRemoveFile(f.id)}
+                  className="p-1 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700
+                             transition-colors duration-150 shrink-0"
+                  title="Remove file"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="relative">
           <textarea
             ref={textareaRef}
@@ -94,13 +155,13 @@ export default function MessageInput({
             onKeyDown={handleKeyDown}
             placeholder={
               sessionId
-                ? "Type a message... (Shift+Enter for new line)"
+                ? "Type a message... (Shift+Enter for new line, or attach a file)"
                 : "Create or select a chat first"
             }
-            disabled={!sessionId || isLoading}
+            disabled={disabled}
             rows={1}
             className="w-full resize-none rounded-xl border border-zinc-700
-                       bg-zinc-800 px-4 py-3 pr-14 text-sm text-zinc-100
+                       bg-zinc-800 px-4 py-3 pr-24 text-sm text-zinc-100
                        placeholder-zinc-500
                        focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent
                        disabled:opacity-50 disabled:cursor-not-allowed
@@ -108,6 +169,28 @@ export default function MessageInput({
           />
 
           <div className="absolute right-2 bottom-2 flex gap-1">
+            {/* Attach file */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled}
+              className="p-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700
+                         disabled:opacity-40 disabled:cursor-not-allowed
+                         transition-colors duration-150"
+              title="Attach file (gambar, PDF, DOCX, teks/kode)"
+            >
+              <Paperclip size={16} />
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+              accept="image/*,.pdf,.docx,.txt,.md,.markdown,.json,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cpp,.css,.html,.htm,.xml,.yml,.yaml,.toml,.sh,.bash,.csv,.log,.sql,.svg"
+            />
+
             {isLoading ? (
               <button
                 type="button"
@@ -121,7 +204,7 @@ export default function MessageInput({
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim() || !sessionId}
+                disabled={!canSend}
                 className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500
                            text-white disabled:bg-zinc-700 disabled:text-zinc-500
                            transition-colors duration-150"

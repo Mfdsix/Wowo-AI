@@ -20,6 +20,10 @@ export async function GET(
       replyToId: true,
       quoteText: true,
       createdAt: true,
+      attachments: {
+        select: { id: true, filename: true, mimeType: true, size: true },
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
 

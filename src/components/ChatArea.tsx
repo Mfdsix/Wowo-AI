@@ -1,39 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, FileText } from "lucide-react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
 import TextSelectionToolbar from "./TextSelectionToolbar";
-
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  model?: string | null;
-  bookmarked?: boolean;
-  replyToId?: string | null;
-  quoteText?: string | null;
-  createdAt?: string;
-};
+import type { Message } from "@/lib/types";
 
 // ─── ReactMarkdown component overrides ──────────────────────
-const MARKDOWN_COMPONENTS = {
+const MARKDOWN_COMPONENTS: Components = {
   // Jangan bungkus pake <pre> — biar CodeBlock full kontrol layout
-  pre({ children }: any) {
+  pre({ children }) {
     return <>{children}</>;
   },
-  code({ className, children, ...props }: any) {
+  code({ className, children }) {
     const match = /language-(\w+)/.exec(className || "");
     const code = String(children).replace(/\n$/, "");
 
     if (!match) {
       return (
-        <code
-          className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-200 text-sm font-mono"
-          {...props}
-        >
+        <code className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-200 text-sm font-mono">
           {children}
         </code>
       );
@@ -162,6 +149,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
             <MessageBubble
               key={msg.id}
               message={msg}
+              sessionId={sessionId}
               replyToContent={replyToMsg?.content}
               isLastAssistant={idx === lastAssistantIdx}
               showRegenerate={idx === lastAssistantIdx && !isLoading && messages.length > 0}
@@ -213,6 +201,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
 
 type MessageBubbleProps = {
   message: Message;
+  sessionId: string | null;
   replyToContent?: string;
   isLastAssistant: boolean;
   showRegenerate: boolean;
@@ -221,7 +210,7 @@ type MessageBubbleProps = {
   onReplyAction?: (message: Message) => void;
 };
 
-function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction }: MessageBubbleProps) {
+function MessageBubble({ message, sessionId, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -300,6 +289,31 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
                 : ""
             }`}
           >
+            {/* Attachments — gambar & dokumen yang di-attach */}
+            {isUser && message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {message.attachments.map((att) =>
+                  att.mimeType.startsWith("image/") ? (
+                    <img
+                      key={att.id}
+                      src={`/api/sessions/${sessionId}/attachments/${att.id}/data`}
+                      alt={att.filename}
+                      loading="lazy"
+                      className="max-h-48 rounded-lg border border-white/10 object-cover"
+                    />
+                  ) : (
+                    <div
+                      key={att.id}
+                      className="flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-1 text-xs text-white/90"
+                    >
+                      <FileText size={13} className="shrink-0" />
+                      <span className="max-w-[160px] truncate">{att.filename}</span>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+
             <div className={`prose prose-invert prose-sm max-w-none break-words ${
               isError ? "text-red-400" : isUser ? "text-white" : "text-zinc-200"
             }`}>

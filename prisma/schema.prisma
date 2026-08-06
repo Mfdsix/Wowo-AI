@@ -9,24 +9,43 @@ datasource db {
 }
 
 model Session {
-  id        String    @id @default(cuid())
-  title     String    @default("New Chat")
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  messages  Message[]
+  id          String       @id @default(cuid())
+  title       String       @default("New Chat")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  messages    Message[]
+  attachments Attachment[]
 }
 
 model Message {
-  id         String   @id @default(cuid())
-  sessionId  String
-  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role       String   // "user" | "assistant"
-  content    String
-  model      String?  // nama model yang dipake (optional)
-  bookmarked Boolean  @default(false)
-  replyToId  String?  // referensi pesan yang di-reply (quote)
-  quoteText  String?  // teks spesifik yang di-quote (highlight)
-  createdAt  DateTime @default(now())
+  id          String       @id @default(cuid())
+  sessionId   String
+  session     Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role        String       // "user" | "assistant"
+  content     String
+  model       String?      // nama model yang dipake (optional)
+  bookmarked  Boolean      @default(false)
+  replyToId   String?      // referensi pesan yang di-reply (quote)
+  quoteText   String?      // teks spesifik yang di-quote (highlight)
+  attachments Attachment[]
+  createdAt   DateTime     @default(now())
 
   @@index([sessionId])
+}
+
+model Attachment {
+  id          String   @id @default(cuid())
+  sessionId   String
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  messageId   String
+  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename    String
+  mimeType    String   // full IANA type (ternormalisasi)
+  size        Int      // bytes
+  data        Bytes?   // raw bytes (semua attachment: thumbnail + regenerate)
+  textContent String?  // extracted text (pdf/docx/text)
+  createdAt   DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([messageId])
 }

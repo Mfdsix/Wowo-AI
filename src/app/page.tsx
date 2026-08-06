@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
-import MessageInput from "@/components/MessageInput";
+import MessageInput, { type PendingFile } from "@/components/MessageInput";
+import type { Message, ReplyTarget, AttachmentMeta } from "@/lib/types";
 
 type Session = {
   id: string;
@@ -13,24 +14,9 @@ type Session = {
   _count: { messages: number };
 };
 
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  model?: string | null;
-  bookmarked?: boolean;
-  replyToId?: string | null;
-  quoteText?: string | null;
-  createdAt?: string;
-};
-
-// Target referensi buat reply/quote
-type ReplyTarget = {
-  id: string;
-  content: string;
-  role?: string;
-  quoteText?: string;
-};
+// Client-side caps — mirror caps di src/lib/attachments.ts
+const MAX_CLIENT_FILES = 10;
+const MAX_CLIENT_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export default function Home() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -40,6 +26,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   // ─── Fetch all sessions ────────────────────────────────────
@@ -203,16 +190,58 @@ export default function Home() {
     [sessions, activeSessionId, fetchMessages]
   );
 
+  // ─── File attachment ────────────────────────────────────────
+  const handleAddFiles = useCallback((fileList: FileList | File[]) => {
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) return;
+
+    setPendingFiles((prev) => {
+      const room = Math.max(0, MAX_CLIENT_FILES - prev.length);
+      const oversized = incoming.filter((f) => f.size > MAX_CLIENT_BYTES);
+      if (oversized.length > 0) {
+        console.warn(
+          `Lewati file >${MAX_CLIENT_BYTES / 1024 / 1024}MB:`,
+          oversized.map((f) => f.name)
+        );
+      }
+      const toAdd = incoming.filter((f) => f.size <= MAX_CLIENT_BYTES).slice(0, room);
+
+      const items: PendingFile[] = toAdd.map((f) => ({
+        id: crypto.randomUUID(),
+        file: f,
+        previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
+      }));
+      return [...prev, ...items];
+    });
+  }, []);
+
+  const handleRemoveFile = useCallback((id: string) => {
+    setPendingFiles((prev) => {
+      const target = prev.find((p) => p.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((p) => p.id !== id);
+    });
+  }, []);
+
+  const clearPendingFiles = useCallback(() => {
+    setPendingFiles((prev) => {
+      prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
+      return [];
+    });
+  }, []);
+
   // ─── Send message ───────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     const trimmed = input.trim();
-    if (!trimmed || !activeSessionId || isLoading) return;
+    if ((!trimmed && pendingFiles.length === 0) || !activeSessionId || isLoading) return;
 
     const userContent = trimmed;
-    // Capture reply reference sebelum di-clear
+    // Capture reply reference & files sebelum di-clear
     const activeReply = replyTarget;
+    const files = pendingFiles;
     setInput("");
     setReplyTarget(null);
+    clearPendingFiles();
 
     // 1. Add user message to UI immediately
     const tempUserMsg: Message = {
@@ -221,12 +250,13 @@ export default function Home() {
       content: userContent,
       replyToId: activeReply?.id || null,
       quoteText: activeReply?.quoteText || null,
+      attachments: [],
     };
     setMessages((prev) => [...prev, tempUserMsg]);
     setIsLoading(true);
 
     // 2. Save user message to DB
-    await saveMessage(
+    const savedUserMsg = await saveMessage(
       activeSessionId,
       "user",
       userContent,
@@ -234,6 +264,37 @@ export default function Home() {
       activeReply?.id || null,
       activeReply?.quoteText || null
     );
+
+    // 2b. Upload attachments ke pesan yang barusan disimpan
+    let attachmentMeta: AttachmentMeta[] = [];
+    if (files.length > 0 && savedUserMsg) {
+      try {
+        const upForm = new FormData();
+        files.forEach((f) => upForm.append("files", f.file));
+        const upRes = await fetch(
+          `/api/sessions/${activeSessionId}/messages/${savedUserMsg.id}/attachments`,
+          { method: "POST", body: upForm }
+        );
+        if (upRes.ok) {
+          attachmentMeta = (await upRes.json()) as AttachmentMeta[];
+        } else {
+          console.error("Upload attachments failed:", upRes.status);
+        }
+      } catch (err) {
+        console.error("Upload attachments error:", err);
+      }
+    }
+
+    // 2c. Swap temp → persisted (regenerate butuh message id real)
+    if (savedUserMsg) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempUserMsg.id
+            ? { ...savedUserMsg, attachments: attachmentMeta }
+            : m
+        )
+      );
+    }
 
     // 3. Auto-title: set session title from first user message
     const currentMessages = messages.filter((m) => !m.id.startsWith("temp-"));
@@ -246,23 +307,30 @@ export default function Home() {
     abortRef.current = abortController;
 
     try {
+      const chatForm = new FormData();
+      chatForm.append(
+        "messages",
+        JSON.stringify([
+          ...messages.filter((m) => !m.id.startsWith("temp-")),
+          { role: "user", content: userContent },
+        ])
+      );
+      // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
+      // Quote → pake teks yang di-highlight; Reply → pake isi pesan
+      if (activeReply) {
+        chatForm.append(
+          "replyTo",
+          JSON.stringify({
+            id: activeReply.id,
+            content: activeReply.quoteText || activeReply.content,
+          })
+        );
+      }
+      files.forEach((f) => chatForm.append("files", f.file));
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            ...messages.filter((m) => !m.id.startsWith("temp-")),
-            { role: "user" as const, content: userContent },
-          ],
-          // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
-          // Quote → pake teks yang di-highlight; Reply → pake isi pesan
-          replyTo: activeReply
-            ? {
-                id: activeReply.id,
-                content: activeReply.quoteText || activeReply.content,
-              }
-            : undefined,
-        }),
+        body: chatForm,
         signal: abortController.signal,
       });
 
@@ -301,7 +369,8 @@ export default function Home() {
 
       // 6. Save assistant message to DB
       if (assistantContent) {
-        await saveMessage(activeSessionId, "assistant", assistantContent);
+        const modelName = res.headers.get("x-llm-model") || undefined;
+        await saveMessage(activeSessionId, "assistant", assistantContent, modelName);
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") {
@@ -328,7 +397,7 @@ export default function Home() {
       abortRef.current = null;
       fetchSessions();
     }
-  }, [input, activeSessionId, isLoading, messages, replyTarget, saveMessage, updateSessionTitle, fetchSessions]);
+  }, [input, activeSessionId, isLoading, messages, replyTarget, pendingFiles, clearPendingFiles, saveMessage, updateSessionTitle, fetchSessions]);
 
   // ─── Regenerate response ──────────────────────────────────
   const handleRegenerate = useCallback(async () => {
@@ -358,6 +427,10 @@ export default function Home() {
       return newMsgs;
     });
 
+    // Pesan user terakhir dari state (untuk re-attach files saat regenerate)
+    const lastUserMsg: Message | null =
+      [...messages].reverse().find((m) => m.role === "user") ?? null;
+
     // Hapus dari DB kalo id-nya real (bukan temp-)
     if (lastAssistantId && !lastAssistantId.startsWith("temp-") && !lastAssistantId.startsWith("assist-")) {
       try {
@@ -381,12 +454,33 @@ export default function Home() {
     abortRef.current = abortController;
 
     try {
+      const chatForm = new FormData();
+      chatForm.append(
+        "messages",
+        JSON.stringify([...historyForApi, { role: "user", content: lastUserContent }])
+      );
+
+      // Re-attach files dari pesan user terakhir (fetch bytes on-demand)
+      if (lastUserMsg?.attachments?.length) {
+        await Promise.all(
+          lastUserMsg.attachments.map(async (att) => {
+            try {
+              const dataRes = await fetch(
+                `/api/sessions/${activeSessionId}/attachments/${att.id}/data`
+              );
+              if (!dataRes.ok) return;
+              const blob = await dataRes.blob();
+              chatForm.append("files", new File([blob], att.filename, { type: att.mimeType }));
+            } catch (err) {
+              console.error("Fetch attachment data error:", err);
+            }
+          })
+        );
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...historyForApi, { role: "user" as const, content: lastUserContent }],
-        }),
+        body: chatForm,
         signal: abortController.signal,
       });
 
@@ -539,6 +633,9 @@ export default function Home() {
           input={input}
           isLoading={isLoading}
           sessionId={activeSessionId}
+          pendingFiles={pendingFiles}
+          onAddFiles={handleAddFiles}
+          onRemoveFile={handleRemoveFile}
           onInputChange={setInput}
           onSubmit={handleSubmit}
           onStop={handleStop}

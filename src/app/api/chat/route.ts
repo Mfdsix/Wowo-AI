@@ -1,18 +1,46 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
+import {
+  analyzeFile,
+  AttachmentValidationError,
+  buildUserContentParts,
+  MAX_FILES,
+  pickModelConfig,
+  type AnalyzedAttachment,
+} from "@/lib/attachments";
 
 export const dynamic = "force-dynamic";
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export async function POST(req: NextRequest) {
-  let body;
+  let formData: FormData;
   try {
-    body = await req.json();
+    formData = await req.formData();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Request harus multipart/form-data" },
+      { status: 400 }
+    );
   }
 
-  const { messages, replyTo } = body;
+  // ─── Parse messages (JSON string di field "messages") ────────
+  const messagesStr = formData.get("messages");
+  if (typeof messagesStr !== "string" || !messagesStr.trim()) {
+    return NextResponse.json(
+      { error: "messages wajib dikirim (JSON string)" },
+      { status: 400 }
+    );
+  }
+
+  let messages: unknown;
+  try {
+    messages = JSON.parse(messagesStr);
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON messages" }, { status: 400 });
+  }
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return NextResponse.json(
@@ -21,28 +49,79 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Inject reply reference — kasih tau AI bahwa user mereferensi pertanyaan sebelumnya
-  let finalMessages = messages;
-  if (replyTo?.content && typeof replyTo.content === "string" && replyTo.content.trim()) {
-    finalMessages = [...messages];
-    const lastIdx = finalMessages.length - 1;
-    if (lastIdx >= 0 && finalMessages[lastIdx].role === "user") {
-      finalMessages[lastIdx] = {
-        ...finalMessages[lastIdx],
-        content:
-          `[User mereferensi pertanyaan sebelumnya: "${replyTo.content}"]\n\n` +
-          finalMessages[lastIdx].content,
-      };
+  // ─── Parse replyTo (optional) ────────────────────────────────
+  const replyToStr = formData.get("replyTo");
+  let replyTo: { content?: unknown } | null = null;
+  if (typeof replyToStr === "string" && replyToStr.trim()) {
+    try {
+      replyTo = JSON.parse(replyToStr);
+    } catch {}
+  }
+
+  // ─── Parse & analisa files ───────────────────────────────────
+  const files = formData
+    .getAll("files")
+    .filter((e): e is File => typeof e !== "string");
+
+  if (files.length > MAX_FILES) {
+    return NextResponse.json(
+      { error: `Maksimal ${MAX_FILES} file per pesan` },
+      { status: 400 }
+    );
+  }
+
+  let analyzed: AnalyzedAttachment[] = [];
+  if (files.length > 0) {
+    try {
+      analyzed = await Promise.all(files.map((f) => analyzeFile(f)));
+    } catch (err) {
+      if (err instanceof AttachmentValidationError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      console.error("Analyze attachment error:", err);
+      return NextResponse.json({ error: "Gagal memproses file" }, { status: 400 });
     }
   }
 
-  const openai = createOpenAI({
-    baseURL: process.env.LLM_BASE_URL || "http://localhost:11434/v1",
-    apiKey: process.env.LLM_API_KEY || "",
+  const hasImage = analyzed.some((a) => a.kind === "image");
+
+  // ─── Pilih model: vision kalau ada gambar, text model untuk biasa ─
+  const config = pickModelConfig(hasImage);
+  if ("error" in config) {
+    return NextResponse.json({ error: config.error }, { status: 400 });
+  }
+  const { openai, modelName } = config;
+
+  // ─── Bangun ulang konten pesan user terakhir jadi parts ──────
+  const lastIdx = messages.length - 1;
+  const last = messages[lastIdx];
+  if (!last || last.role !== "user") {
+    return NextResponse.json(
+      { error: "Pesan terakhir harus dari user" },
+      { status: 400 }
+    );
+  }
+
+  // Inject reply reference — kasih tau AI bahwa user mereferensi pertanyaan sebelumnya
+  const replyPrefix =
+    replyTo?.content && typeof replyTo.content === "string" && replyTo.content.trim()
+      ? `[User mereferensi pertanyaan sebelumnya: "${replyTo.content}"]\n\n`
+      : "";
+
+  const parts = buildUserContentParts({
+    userText: typeof last.content === "string" ? last.content : "",
+    replyPrefix,
+    attachments: analyzed,
   });
 
-  const modelName = process.env.LLM_MODEL || "gpt-3.5-turbo";
+  if (parts.length === 0) {
+    return NextResponse.json({ error: "Pesan kosong" }, { status: 400 });
+  }
 
+  const finalMessages = [...messages];
+  finalMessages[lastIdx] = { ...last, content: parts };
+
+  // ─── Stream response dari LLM ────────────────────────────────
   try {
     const result = streamText({
       model: openai.chat(modelName),
@@ -67,17 +146,18 @@ export async function POST(req: NextRequest) {
           for await (const chunk of textStream) {
             controller.enqueue(new TextEncoder().encode(chunk));
           }
-        } catch (err: any) {
-          console.error("LLM stream error:", err?.message || err);
-          const errMsg = err?.message?.includes("Cannot connect")
+        } catch (err) {
+          console.error("LLM stream error:", err);
+          const msg = errorMessage(err);
+          const errMsg = msg.includes("Cannot connect")
             ? "LLM endpoint unreachable. Cek LLM_BASE_URL & koneksi jaringan."
-            : err?.message?.includes("401")
+            : msg.includes("401")
             ? "LLM API key invalid. Cek LLM_API_KEY."
-            : err?.message?.includes("404")
+            : msg.includes("404")
             ? "LLM endpoint atau model not found. Cek URL & LLM_MODEL."
-            : err?.message?.includes("Cannot read properties")
+            : msg.includes("Cannot read properties")
             ? "LLM ngasih response format yang gak sesuai. Cek kompatibilitas model."
-            : `LLM error: ${err?.message || "Unknown error"}`;
+            : `LLM error: ${msg || "Unknown error"}`;
           // Kirim error message sebagai teks di stream biar user liat
           controller.enqueue(
             new TextEncoder().encode(`\n\n_❌ ${errMsg}_`)
@@ -94,12 +174,13 @@ export async function POST(req: NextRequest) {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
+        "x-llm-model": modelName,
       },
     });
-  } catch (error: any) {
-    console.error("LLM setup error:", error?.message || error);
+  } catch (error) {
+    console.error("LLM setup error:", error);
     return NextResponse.json(
-      { error: `LLM error: ${error?.message || "Unknown error"}` },
+      { error: `LLM error: ${errorMessage(error)}` },
       { status: 502 }
     );
   }
