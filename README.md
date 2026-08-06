@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# wowo.ai
+
+AI-powered chat & designer platform untuk bikin landing page dan web design secara instan.
+
+## Fitur Utama
+
+### Chat Interface
+- AI chat dengan conversation history sidebar
+- Quote & reply pesan sebelumnya untuk konteks yang lebih baik
+- Bookmark pesan penting untuk referensi nanti
+- Text selection toolbar untuk quick copy & quote
+
+### Code Blocks
+- Syntax highlighting untuk HTML, CSS, JavaScript, dan lainnya
+- Fullscreen mode untuk melihat kode lebih jelas
+- One-click copy ke clipboard
+- Live preview langsung dari code block
+
+### Designer Mode
+- Visual design canvas dengan multiple artboards
+- Generate halaman dari deskripsi teks
+- Ganti style instant (Default, natural-tone, dll)
+- Zoom controls untuk detail yang lebih baik
+- Mobile/Web toggle untuk preview responsive
+
+### Wireframe Preview
+- Preview hasil design dalam iframe sandboxed
+- Export HTML untuk kebutuhan production
+- Responsive preview (mobile & desktop)
+
+## Tech Stack
+
+- **Framework**: Next.js 16
+- **UI**: Tailwind CSS 4
+- **AI**: Vercel AI SDK
+- **Database**: Prisma + PostgreSQL
+- **Language**: TypeScript
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+# Install dependencies
+npm install
+
+# Setup database
+npx prisma db push
+
+# Run development server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Buka [http://localhost:3000](http://localhost:3000) di browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Screenshots
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Chat Interface | Designer Mode |
+|----------------|---------------|
+| ![Chat](screenshots/preview.png) | ![Designer](screenshots/designer.png) |
 
-## Learn More
+| Code Blocks | Wireframe Preview |
+|-------------|-------------------|
+| ![Code](screenshots/code-block.png) | ![Preview](screenshots/preview.png) |
 
-To learn more about Next.js, take a look at the following resources:
+## License
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Private - All rights reserved.
