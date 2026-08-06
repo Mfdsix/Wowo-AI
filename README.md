@@ -36,6 +36,24 @@ AI-powered chat & designer platform untuk bikin landing page dan web design seca
 - **Database**: Prisma + PostgreSQL
 - **Language**: TypeScript
 
+## NeedMCP Integration
+
+**NeedMCP** ([https://needmcp.com](https://needmcp.com)) adalah MCP server design system yang dipakai buat fitur **"Ganti Style"** di Designer Mode. Perannya: nyediain design system (warna, typography, spacing, rounded, komponen, layout, wireframe) untuk style tertentu — AI pakai itu sebagai *grounding* biar hasil generate halaman konsisten sama design language yang dipilih user.
+
+Integrasinya **opsional**. Tanpa API key, semua behavior jalan normal dengan style bawaan wowo.ai. Kalo aktif, flow-nya: user pilih style → style di-lock ke session → AI pre-fetch design tokens style tsb → HTML yang dihasilkan grounded ke design system-nya.
+
+### Cara dapetin API key
+
+1. Register/login di [https://needmcp.com](https://needmcp.com)
+2. Ambil API key dari NeedMCP Dashboard
+3. Set di file `.env`:
+
+```
+NEEDMCP_API_KEY="your-api-key"
+```
+
+Kosongin atau hapus variabel ini kalau mau matiin integrasinya. Contoh lengkap ada di `.env.example`.
+
 ## Getting Started
 
 ```bash
