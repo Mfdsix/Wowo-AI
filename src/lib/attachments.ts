@@ -5,6 +5,14 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
+import {
+  calculateOcrScore,
+  profileFromPages,
+  routePdf,
+  type DocRoute,
+  type DocumentProfile,
+  type ResolvedPdf,
+} from "./documentRouter";
 
 // ─── Caps ───────────────────────────────────────────────────────
 export const MAX_FILES = 10;
@@ -21,6 +29,10 @@ export type AnalyzedAttachment = {
   size: number;
   data: Uint8Array<ArrayBuffer>; // Prisma Bytes butuh ArrayBuffer-backed
   textContent: string | null; // null untuk image (model vision yang baca langsung)
+  // Routing (cuma PDF): jalur mana yang bakal dipake buat baca dokumen ini.
+  // Di-set pas analisa, disimpan ke DB, dan dipake ulang pas regenerate.
+  route?: DocRoute;
+  profile?: DocumentProfile;
 };
 
 // Bentuk minimal file yang diupload (cocok buat global File di Node runtime)
@@ -95,14 +107,21 @@ export function detectKind(filename: string, mimeType: string): FileKind | null 
 }
 
 // ─── Ekstraksi teks ─────────────────────────────────────────────
-async function extractPdfText(data: Uint8Array): Promise<string> {
+// PDF: selain teks gabungan, balikin per-page text buat Document Profiler.
+async function extractPdf(
+  data: Uint8Array
+): Promise<{ text: string; pages: { num: number; text: string }[]; pageCount: number }> {
   // Copy dulu — pdf.js TRANSFER buffer ke worker thread (detach),
   // jadi data asli yang mau disimpan ke DB harus tetap utuh
   const copy = new Uint8Array(data);
   const parser = new PDFParse({ data: copy });
   try {
     const result = await parser.getText();
-    return result.text || "";
+    return {
+      text: result.text || "",
+      pages: result.pages,
+      pageCount: result.total,
+    };
   } finally {
     await parser.destroy();
   }
@@ -144,15 +163,27 @@ export async function analyzeFile(file: UploadFileLike): Promise<AnalyzedAttachm
   const data = new Uint8Array(await file.arrayBuffer());
 
   let textContent: string | null = null;
+  let route: DocRoute | undefined;
+  let profile: DocumentProfile | undefined;
   if (kind !== "image") {
     try {
-      const raw =
-        kind === "pdf"
-          ? await extractPdfText(data)
-          : kind === "docx"
-          ? await extractDocxText(data)
-          : decodeText(data);
-      textContent = truncateText(raw, MAX_EXTRACTED_CHARS);
+      if (kind === "pdf") {
+        const pdf = await extractPdf(data);
+        textContent = truncateText(pdf.text, MAX_EXTRACTED_CHARS);
+        // Document Router: sinyal scan/native dari per-page text.
+        // Keputusan disimpan biar UI & regenerate tahu jalurnya.
+        profile = profileFromPages(pdf.pages, pdf.pageCount);
+        route = routePdf(profile);
+        console.log(
+          `[DocumentRouter] "${filename}": ${route} (score=${calculateOcrScore(profile)}, ` +
+            `${profile.pageCount} hal, avg ${Math.round(profile.avgTextPerPage)} chars/hal, ` +
+            `coverage ${(profile.textCoverage * 100).toFixed(0)}%)`
+        );
+      } else {
+        const raw =
+          kind === "docx" ? await extractDocxText(data) : decodeText(data);
+        textContent = truncateText(raw, MAX_EXTRACTED_CHARS);
+      }
     } catch (err) {
       console.error(`Extract text error untuk "${filename}":`, err);
       throw new AttachmentValidationError(
@@ -161,7 +192,7 @@ export async function analyzeFile(file: UploadFileLike): Promise<AnalyzedAttachm
     }
   }
 
-  return { kind, filename, mimeType, size, data, textContent };
+  return { kind, filename, mimeType, size, data, textContent, route, profile };
 }
 
 // ─── Build AI SDK parts ─────────────────────────────────────────
@@ -179,6 +210,7 @@ export function buildUserContentParts(input: {
   userText: string;
   replyPrefix?: string;
   attachments: AnalyzedAttachment[];
+  resolvedPdfs?: ResolvedPdf[];
 }): UserContentPart[] {
   const parts: UserContentPart[] = [];
 
@@ -186,11 +218,49 @@ export function buildUserContentParts(input: {
   if (input.replyPrefix) text += input.replyPrefix;
   text += input.userText;
 
-  // Dokumen & file teks → injected sebagai konteks teks
-  const docs = input.attachments.filter((a) => a.kind !== "image" && a.textContent);
+  // Dokumen & file teks → injected sebagai konteks teks.
+  // PDF yang udah di-route (vision/ocr) di-exclude — dia di-handle via resolvedPdfs.
+  const routedPdfNames = new Set((input.resolvedPdfs ?? []).map((p) => p.filename));
+  const docs = input.attachments.filter(
+    (a) =>
+      a.kind !== "image" &&
+      a.textContent &&
+      !(a.kind === "pdf" && routedPdfNames.has(a.filename))
+  );
   if (docs.length > 0) {
     text +=
       "\n\n" + docs.map((d) => `[Dokumen: ${d.filename}]\n${d.textContent}`).join("\n\n");
+  }
+
+  // PDF yang di-route → vision: note + halaman dirender sebagai gambar.
+  // OCR: teks hasil OCR + confidence.
+  for (const p of input.resolvedPdfs ?? []) {
+    if (p.route === "ocr" && p.ocrText) {
+      const confPct = p.ocrConfidence != null
+        ? ` (confidence ${(p.ocrConfidence * 100).toFixed(0)}%)`
+        : "";
+      text +=
+        `\n\n[OCR: ${p.filename}${confPct}]\n` +
+        `${p.ocrText}\n` +
+        `[Akhir OCR ${p.filename} — teks di atas hasil OCR otomatis, bisa ada kesalahan baca]`;
+      continue;
+    }
+
+    // vision
+    const totalNote =
+      p.pageCount != null && p.pageCount > p.pages.length
+        ? ` (dari ${p.pageCount} halaman, cuma ${p.pages.length} pertama yang dikirim)`
+        : "";
+    text +=
+      `\n\n[Scanned PDF: ${p.filename} — halaman 1..${p.pages.length} dirender sebagai gambar${totalNote}]`;
+    for (const page of p.pages) {
+      parts.push({
+        type: "file",
+        mediaType: "image/png",
+        filename: `${p.filename} - halaman ${page.pageNumber}.png`,
+        data: { type: "data", data: page.data },
+      });
+    }
   }
 
   // Skip text part kosong — user yang cuma kirim gambar tanpa teks

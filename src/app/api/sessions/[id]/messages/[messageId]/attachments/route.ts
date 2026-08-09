@@ -76,6 +76,7 @@ export async function POST(
             size: a.size,
             data: a.data,
             textContent: a.textContent,
+            route: a.route ?? null,
           },
         })
       )
@@ -87,6 +88,7 @@ export async function POST(
         filename: r.filename,
         mimeType: r.mimeType,
         size: r.size,
+        route: r.route ?? undefined,
       })),
       { status: 201 }
     );

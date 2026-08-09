@@ -46,6 +46,7 @@ model Attachment {
   size        Int      // bytes
   data        Bytes?   // raw bytes (semua attachment: thumbnail + regenerate)
   textContent String?  // extracted text (pdf/docx/text)
+  route       String?  // Document Router: native | vision | ocr (cuma PDF)
   createdAt   DateTime @default(now())
 
   @@index([sessionId])

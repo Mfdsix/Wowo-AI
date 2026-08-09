@@ -6,6 +6,8 @@ export type AttachmentMeta = {
   filename: string;
   mimeType: string;
   size: number;
+  // Document Router (cuma PDF): jalur yang dipake buat baca dokumen ini.
+  route?: "native" | "vision" | "ocr";
 };
 
 export type Message = {

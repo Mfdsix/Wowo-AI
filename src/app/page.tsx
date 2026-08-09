@@ -290,25 +290,17 @@ export default function Home() {
       const items: PendingFile[] = toAdd.map((f) => ({
         id: crypto.randomUUID(),
         file: f,
-        previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
       }));
       return [...prev, ...items];
     });
   }, []);
 
   const handleRemoveFile = useCallback((id: string) => {
-    setPendingFiles((prev) => {
-      const target = prev.find((p) => p.id === id);
-      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
-      return prev.filter((p) => p.id !== id);
-    });
+    setPendingFiles((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
   const clearPendingFiles = useCallback(() => {
-    setPendingFiles((prev) => {
-      prev.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
-      return [];
-    });
+    setPendingFiles([]);
   }, []);
 
   // ─── Send message ───────────────────────────────────────────
@@ -1066,6 +1058,13 @@ export default function Home() {
     designerSubmitRef.current = handleDesignerSubmit;
   }, [handleDesignerSubmit]);
 
+  // Designer mode cuma muncul kalau ada UI yang ke-generate di chat
+  // (assistant message berisi ```html, atau udah ada designer page)
+  const hasGeneratedUI =
+    viewMode === "designer" ||
+    designerPages.length > 0 ||
+    messages.some((m) => m.role === "assistant" && m.content.includes("```html"));
+
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-900">
       {/* Sidebar cuma di chat mode — designer auto fullscreen */}
@@ -1082,7 +1081,8 @@ export default function Home() {
       )}
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* View toggle: Chat | Designer */}
+        {/* View toggle: Chat | Designer — cuma muncul kalau ada UI yang ke-generate */}
+        {hasGeneratedUI && (
         <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
           <button
             onClick={() => setViewMode("chat")}
@@ -1107,6 +1107,7 @@ export default function Home() {
             Designer
           </button>
         </div>
+        )}
 
         {viewMode === "chat" ? (
           <>

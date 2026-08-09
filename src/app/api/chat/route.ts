@@ -15,6 +15,12 @@ import {
   pickModelConfig,
   type AnalyzedAttachment,
 } from "@/lib/attachments";
+import {
+  getMaxVisionPdfPages,
+  renderPdfPages,
+  type ResolvedPdf,
+} from "@/lib/documentRouter";
+import { runPaddleOcr } from "@/lib/ocrClient";
 
 export const dynamic = "force-dynamic";
 
@@ -122,8 +128,68 @@ export async function POST(req: NextRequest) {
 
   const hasImage = analyzed.some((a) => a.kind === "image");
 
-  // ─── Pilih model: vision kalau ada gambar, text model untuk biasa ─
-  const config = pickModelConfig(hasImage);
+  // ─── Resolve PDF scan: render halaman → vision, atau → OCR service ──
+  // Document Router udah nge-route di analyzeFile (route: native/vision/ocr).
+  // native → teks langsung (jalur default). Di sini cuma handle yang
+  // butuh render: vision → gambar halaman; ocr → PaddleOCR (fallback vision).
+  const OCR_BASE_URL = process.env.OCR_BASE_URL?.trim();
+  const OCR_LANG = process.env.OCR_LANGUAGE?.trim() || "ch";
+  const maxPages = getMaxVisionPdfPages();
+
+  const resolvedPdfs: ResolvedPdf[] = [];
+  for (const a of analyzed.filter(
+    (x) => x.kind === "pdf" && x.route && x.route !== "native"
+  )) {
+    try {
+      const pages = await renderPdfPages(a.data, { maxPages });
+      if (pages.length === 0) continue;
+
+      if (a.route === "ocr" && OCR_BASE_URL) {
+        try {
+          const ocrPages = await runPaddleOcr(pages, OCR_BASE_URL, OCR_LANG);
+          const ocrText = ocrPages.map((p) => p.text).filter(Boolean).join("\n\n");
+          resolvedPdfs.push({
+            filename: a.filename,
+            route: "ocr",
+            pageCount: a.profile?.pageCount,
+            pages,
+            ocrText,
+            ocrConfidence:
+              ocrPages.length > 0
+                ? ocrPages.reduce((s, p) => s + p.confidence, 0) / ocrPages.length
+                : undefined,
+          });
+          continue;
+        } catch (err) {
+          console.error(
+            `[DocumentRouter] OCR gagal buat "${a.filename}", fallback ke vision:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+
+      // vision (atau ocr yang fallback)
+      console.log(
+        `[DocumentRouter] "${a.filename}" → ${a.route}: render ${pages.length} halaman ke vision`
+      );
+      resolvedPdfs.push({
+        filename: a.filename,
+        route: "vision",
+        pageCount: a.profile?.pageCount,
+        pages,
+      });
+    } catch (err) {
+      console.error(
+        `[DocumentRouter] Gagal render "${a.filename}":`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  const needsVision = hasImage || resolvedPdfs.some((p) => p.route === "vision");
+
+  // ─── Pilih model: vision kalau butuh lihat gambar, text model untuk biasa ─
+  const config = pickModelConfig(needsVision);
   if ("error" in config) {
     return NextResponse.json({ error: config.error }, { status: 400 });
   }
@@ -184,6 +250,7 @@ export async function POST(req: NextRequest) {
       userText,
       replyPrefix,
       attachments: analyzed,
+      resolvedPdfs,
     });
 
     if (parts.length === 0) {

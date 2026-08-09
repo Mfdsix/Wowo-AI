@@ -1,14 +1,14 @@
 "use client";
 
 import { useRef, useEffect, KeyboardEvent, ChangeEvent } from "react";
-import { Send, Square, X, CornerUpLeft, Paperclip, FileText, Image } from "lucide-react";
+import { Send, Square, X, CornerUpLeft, Paperclip } from "lucide-react";
+import FileTypeIcon from "./FileTypeIcon";
 import type { ReplyTarget } from "@/lib/types";
 
 // File yang lagi menunggu dikirim (belum di-persist)
 export type PendingFile = {
   id: string;
   file: File;
-  previewUrl?: string; // object URL — cuma untuk gambar
 };
 
 type MessageInputProps = {
@@ -119,17 +119,11 @@ export default function MessageInput({
                 key={f.id}
                 className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5"
               >
-                {f.previewUrl ? (
-                  <img
-                    src={f.previewUrl}
-                    alt={f.file.name}
-                    className="w-8 h-8 object-cover rounded shrink-0"
-                  />
-                ) : f.file.type.startsWith("image/") ? (
-                  <Image size={16} className="text-zinc-400 shrink-0" />
-                ) : (
-                  <FileText size={16} className="text-zinc-400 shrink-0" />
-                )}
+                <FileTypeIcon
+                  mimeType={f.file.type || "application/octet-stream"}
+                  size={16}
+                  className="shrink-0 text-zinc-400"
+                />
                 <div className="min-w-0">
                   <p className="text-xs text-zinc-300 truncate max-w-[140px]">{f.file.name}</p>
                   <p className="text-[10px] text-zinc-500">{formatSize(f.file.size)}</p>

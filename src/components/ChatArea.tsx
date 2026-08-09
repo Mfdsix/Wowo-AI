@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, FileText, LayoutDashboard } from "lucide-react";
+import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
 import TextSelectionToolbar from "./TextSelectionToolbar";
-import type { Message } from "@/lib/types";
+import FileTypeIcon from "./FileTypeIcon";
+import FilePreviewModal from "./FilePreviewModal";
+import type { Message, AttachmentMeta } from "@/lib/types";
 
 // ─── ReactMarkdown component overrides ──────────────────────
 const MARKDOWN_COMPONENTS: Components = {
@@ -45,6 +47,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeBookmarkId, setActiveBookmarkId] = useState<string | null>(null);
+  const [previewAtt, setPreviewAtt] = useState<AttachmentMeta | null>(null);
 
   // Auto-scroll ke bawah tiap ada pesan baru
   useEffect(() => {
@@ -150,7 +153,6 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
             <MessageBubble
               key={msg.id}
               message={msg}
-              sessionId={sessionId}
               replyToContent={replyToMsg?.content}
               isLastAssistant={idx === lastAssistantIdx}
               showRegenerate={idx === lastAssistantIdx && !isLoading && messages.length > 0}
@@ -158,6 +160,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
               onToggleBookmarkAction={onToggleBookmarkAction}
               onReplyAction={onReplyAction}
               onOpenInDesignerAction={onOpenInDesignerAction}
+              onPreviewAttachment={setPreviewAtt}
             />
           );
         })}
@@ -195,6 +198,15 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
 
       {/* Text selection toolbar — Copy | Quote */}
       <TextSelectionToolbar onQuoteAction={onQuoteAction} />
+
+      {/* File preview modal — klik attachment chip */}
+      {previewAtt && sessionId && (
+        <FilePreviewModal
+          attachment={previewAtt}
+          sessionId={sessionId}
+          onClose={() => setPreviewAtt(null)}
+        />
+      )}
     </div>
   );
 }
@@ -203,7 +215,6 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
 
 type MessageBubbleProps = {
   message: Message;
-  sessionId: string | null;
   replyToContent?: string;
   isLastAssistant: boolean;
   showRegenerate: boolean;
@@ -211,9 +222,10 @@ type MessageBubbleProps = {
   onToggleBookmarkAction?: (messageId: string) => void;
   onReplyAction?: (message: Message) => void;
   onOpenInDesignerAction?: (content: string) => void;
+  onPreviewAttachment?: (att: AttachmentMeta) => void;
 };
 
-function MessageBubble({ message, sessionId, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onOpenInDesignerAction }: MessageBubbleProps) {
+function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onOpenInDesignerAction, onPreviewAttachment }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -237,6 +249,40 @@ function MessageBubble({ message, sessionId, replyToContent, showRegenerate, onR
     >
       {/* Column wrapper — biar action buttons di BAWAH bubble */}
       <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
+      {/* Attachments — icon tipe file, di ATAS bubble */}
+      {isUser && message.attachments && message.attachments.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-2 max-w-[85%] px-4 pt-2">
+          {message.attachments.map((att) => (
+            <button
+              key={att.id}
+              type="button"
+              onClick={() => onPreviewAttachment?.(att)}
+              className="flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-1 text-xs text-white/90 min-w-0
+                         hover:bg-white/20 hover:text-white transition-colors duration-150 cursor-pointer"
+              title={`${att.filename} (${att.mimeType}) — klik buat preview`}
+            >
+              <FileTypeIcon mimeType={att.mimeType} size={13} className="shrink-0" />
+              <span className="truncate max-w-[160px]">{att.filename}</span>
+              {/* Badge route Document Router — cuma PDF punya route */}
+              {att.route && (
+                <span
+                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${
+                    att.route === "native"
+                      ? "bg-emerald-500/20 text-emerald-300"
+                      : "bg-amber-500/20 text-amber-300"
+                  }`}
+                >
+                  {att.route === "native"
+                    ? "native"
+                    : att.route === "ocr"
+                    ? "ocr"
+                    : "scan→vision"}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className={`flex items-start gap-3 px-4 py-3 max-w-[85%] ${
           isUser ? "flex-row-reverse" : ""
@@ -292,31 +338,6 @@ function MessageBubble({ message, sessionId, replyToContent, showRegenerate, onR
                 : ""
             }`}
           >
-            {/* Attachments — gambar & dokumen yang di-attach */}
-            {isUser && message.attachments && message.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-2">
-                {message.attachments.map((att) =>
-                  att.mimeType.startsWith("image/") ? (
-                    <img
-                      key={att.id}
-                      src={`/api/sessions/${sessionId}/attachments/${att.id}/data`}
-                      alt={att.filename}
-                      loading="lazy"
-                      className="max-h-48 rounded-lg border border-white/10 object-cover"
-                    />
-                  ) : (
-                    <div
-                      key={att.id}
-                      className="flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-1 text-xs text-white/90"
-                    >
-                      <FileText size={13} className="shrink-0" />
-                      <span className="max-w-[160px] truncate">{att.filename}</span>
-                    </div>
-                  )
-                )}
-              </div>
-            )}
-
             <div className={`prose prose-invert prose-sm max-w-none break-words ${
               isError ? "text-red-400" : isUser ? "text-white" : "text-zinc-200"
             }`}>
