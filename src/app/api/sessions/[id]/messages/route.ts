@@ -21,7 +21,16 @@ export async function GET(
       quoteText: true,
       createdAt: true,
       attachments: {
-        select: { id: true, filename: true, mimeType: true, size: true, route: true },
+        select: {
+          id: true,
+          filename: true,
+          mimeType: true,
+          size: true,
+          route: true,
+          status: true,
+          progress: true,
+          error: true,
+        },
         orderBy: { createdAt: "asc" },
       },
     },

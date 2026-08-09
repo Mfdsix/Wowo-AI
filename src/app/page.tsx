@@ -118,6 +118,11 @@ export default function Home() {
     }
   }, []);
 
+  // Refetch buat UI poll progress index attachment (ChatArea).
+  const refreshMessages = useCallback(() => {
+    if (activeSessionId) void fetchMessages(activeSessionId);
+  }, [activeSessionId, fetchMessages]);
+
   // ─── Save a message ────────────────────────────────────────
   const saveMessage = useCallback(
     async (
@@ -1120,6 +1125,7 @@ export default function Home() {
               onReplyAction={handleReply}
               onQuoteAction={handleQuote}
               onOpenInDesignerAction={handleOpenInDesigner}
+              onRefreshMessagesAction={refreshMessages}
             />
 
             <MessageInput

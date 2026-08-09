@@ -41,9 +41,46 @@ type ChatAreaProps = {
   onReplyAction?: (message: Message) => void;
   onQuoteAction?: (text: string, messageId: string) => void;
   onOpenInDesignerAction?: (content: string) => void;
+  onRefreshMessagesAction?: () => void; // refetch messages — dipake poll status index
 };
 
-export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction, onOpenInDesignerAction }: ChatAreaProps) {
+// Status Document Intelligence pipeline — chip kecil di attachment
+const PROCESSING_STATUSES = ["pending", "extracting", "ocr", "indexing"] as const;
+const INDEX_STATUS_LABEL: Record<string, string> = {
+  pending: "antri index",
+  extracting: "extract teks",
+  ocr: "OCR…",
+  indexing: "indexing…",
+  ready: "ter-index",
+  failed: "gagal",
+};
+
+function AttachmentIndexChip({ att }: { att: AttachmentMeta }) {
+  if (!att.status) return null;
+  const isProcessing = (PROCESSING_STATUSES as readonly string[]).includes(att.status);
+  const chipClass =
+    att.status === "failed"
+      ? "bg-red-500/20 text-red-300"
+      : att.status === "ready"
+        ? "bg-emerald-500/20 text-emerald-300"
+        : "bg-sky-500/20 text-sky-300";
+  const label = INDEX_STATUS_LABEL[att.status] ?? att.status;
+  const progress =
+    isProcessing && typeof att.progress === "number" && att.progress > 0
+      ? ` ${att.progress}%`
+      : "";
+  return (
+    <span
+      className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${chipClass}`}
+      title={att.status === "failed" ? (att.error ?? "gagal di-index") : undefined}
+    >
+      {label}
+      {progress}
+    </span>
+  );
+}
+
+export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction, onOpenInDesignerAction, onRefreshMessagesAction }: ChatAreaProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeBookmarkId, setActiveBookmarkId] = useState<string | null>(null);
@@ -53,6 +90,20 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: isLoading ? "instant" : "smooth" });
   }, [messages, isLoading]);
+
+  // Poll status index attachment yang lagi diproses — refetch messages
+  // tiap 3 detik selama ada dokumen ke-index (kecuali lagi streaming).
+  const hasProcessingAttachment = messages.some(
+    (m) =>
+      m.attachments?.some((a) =>
+        a.status && (PROCESSING_STATUSES as readonly string[]).includes(a.status)
+      ) ?? false
+  );
+  useEffect(() => {
+    if (!hasProcessingAttachment || isLoading || !onRefreshMessagesAction) return;
+    const t = setInterval(onRefreshMessagesAction, 3000);
+    return () => clearInterval(t);
+  }, [hasProcessingAttachment, isLoading, onRefreshMessagesAction]);
 
   // Track bookmark aktif — star yang lagi keliatan di tengah viewport
   useEffect(() => {
@@ -279,6 +330,8 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
                     : "scan→vision"}
                 </span>
               )}
+              {/* Status Document Intelligence pipeline — index dokumen */}
+              {att.status && <AttachmentIndexChip att={att} />}
             </button>
           ))}
         </div>

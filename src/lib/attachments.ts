@@ -108,7 +108,8 @@ export function detectKind(filename: string, mimeType: string): FileKind | null 
 
 // ─── Ekstraksi teks ─────────────────────────────────────────────
 // PDF: selain teks gabungan, balikin per-page text buat Document Profiler.
-async function extractPdf(
+// Di-export buat index worker (butuh FULL text per halaman, bukan yang di-truncate).
+export async function extractPdf(
   data: Uint8Array
 ): Promise<{ text: string; pages: { num: number; text: string }[]; pageCount: number }> {
   // Copy dulu — pdf.js TRANSFER buffer ke worker thread (detach),
@@ -127,12 +128,12 @@ async function extractPdf(
   }
 }
 
-async function extractDocxText(data: Uint8Array): Promise<string> {
+export async function extractDocxText(data: Uint8Array): Promise<string> {
   const result = await mammoth.extractRawText({ buffer: data });
   return result.value || "";
 }
 
-function decodeText(data: Uint8Array): string {
+export function decodeText(data: Uint8Array): string {
   return new TextDecoder("utf-8").decode(data);
 }
 
@@ -211,6 +212,8 @@ export function buildUserContentParts(input: {
   replyPrefix?: string;
   attachments: AnalyzedAttachment[];
   resolvedPdfs?: ResolvedPdf[];
+  retrievalContext?: string; // NEW: kutipan hasil retrieval (dokumen besar ter-index)
+  retrievalNames?: Set<string>; // NEW: filename yang udah di-handle via retrieval
 }): UserContentPart[] {
   const parts: UserContentPart[] = [];
 
@@ -220,16 +223,27 @@ export function buildUserContentParts(input: {
 
   // Dokumen & file teks → injected sebagai konteks teks.
   // PDF yang udah di-route (vision/ocr) di-exclude — dia di-handle via resolvedPdfs.
+  // Dokumen yang udah di-handle via retrieval (retrievalNames) juga di-exclude —
+  // konteksnya diganti kutipan relevan, bukan teks lengkap.
   const routedPdfNames = new Set((input.resolvedPdfs ?? []).map((p) => p.filename));
   const docs = input.attachments.filter(
     (a) =>
       a.kind !== "image" &&
       a.textContent &&
-      !(a.kind === "pdf" && routedPdfNames.has(a.filename))
+      !(a.kind === "pdf" && routedPdfNames.has(a.filename)) &&
+      !(input.retrievalNames?.has(a.filename))
   );
   if (docs.length > 0) {
     text +=
       "\n\n" + docs.map((d) => `[Dokumen: ${d.filename}]\n${d.textContent}`).join("\n\n");
+  }
+
+  // Kutipan retrieval dari dokumen besar — potongan relevan, bukan teks penuh.
+  // Ini yang bikin konteks LLM tetap kecil walaupun dokumennya 100+ halaman.
+  if (input.retrievalContext) {
+    text +=
+      `\n\n[Dokumen besar dijawab dari index — potongan berikut relevan dengan pertanyaan user, ` +
+      `masing-masing dari halaman tertentu dokumen ter-upload]\n${input.retrievalContext}`;
   }
 
   // PDF yang di-route → vision: note + halaman dirender sebagai gambar.

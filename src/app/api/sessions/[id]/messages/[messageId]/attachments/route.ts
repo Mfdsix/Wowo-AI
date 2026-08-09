@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { analyzeFile, AttachmentValidationError, MAX_FILES } from "@/lib/attachments";
+import { runIndexWorker } from "@/lib/indexWorker";
 
 // POST /api/sessions/[id]/messages/[messageId]/attachments
 // Multipart: files[] → simpan attachment ke message
@@ -82,6 +83,13 @@ export async function POST(
       )
     );
 
+    // Kick index worker di background (fire-and-forget) — dokumen non-image
+    // di-index ke chunk + embedding biar retrieval bisa jawab dari potongan
+    // relevan, bukan nge-stuff seluruh teks dokumen besar ke konteks.
+    void runIndexWorker({ limit: 5 }).catch((err) =>
+      console.error("[IndexWorker] trigger error:", err)
+    );
+
     return NextResponse.json(
       rows.map((r) => ({
         id: r.id,
@@ -89,6 +97,8 @@ export async function POST(
         mimeType: r.mimeType,
         size: r.size,
         route: r.route ?? undefined,
+        status: r.status ?? "pending",
+        progress: r.progress ?? 0,
       })),
       { status: 201 }
     );

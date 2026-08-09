@@ -8,6 +8,10 @@ export type AttachmentMeta = {
   size: number;
   // Document Router (cuma PDF): jalur yang dipake buat baca dokumen ini.
   route?: "native" | "vision" | "ocr";
+  // Document Intelligence pipeline (RAG): status index dokumen besar.
+  status?: "pending" | "extracting" | "ocr" | "indexing" | "ready" | "failed";
+  progress?: number; // 0..100
+  error?: string | null;
 };
 
 export type Message = {

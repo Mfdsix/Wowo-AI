@@ -21,6 +21,13 @@ import {
   type ResolvedPdf,
 } from "@/lib/documentRouter";
 import { runPaddleOcr } from "@/lib/ocrClient";
+import { embeddingEnabled } from "@/lib/embeddings";
+import {
+  findIndexedAttachment,
+  retrieveChunks,
+  RETRIEVAL_MIN_CHUNKS,
+  RETRIEVAL_TOP_K,
+} from "@/lib/retrieval";
 
 export const dynamic = "force-dynamic";
 
@@ -128,17 +135,73 @@ export async function POST(req: NextRequest) {
 
   const hasImage = analyzed.some((a) => a.kind === "image");
 
+  // ─── Retrieval mode: dokumen besar yang udah ke-index → jawab dari chunk ──
+  // Dokumen besar (index ≥ RETRIEVAL_MIN_CHUNKS chunk) dijawab dari potongan
+  // yang relevan sama pertanyaan, BUKAN nge-stuff seluruh teks ke konteks.
+  // Cuma dokumen yang cocok sama attachment ready di DB (filename+size+type) —
+  // ini berarti file-nya udah di-upload & di-index pipeline background.
+  const questionText = (() => {
+    const li = messages.length - 1;
+    const lm = messages[li];
+    return lm && lm.role === "user" && typeof lm.content === "string"
+      ? lm.content
+      : "";
+  })();
+  const retrievalMap = new Map<string, string>(); // filename → kutipan retrieved
+  if (sessionId && embeddingEnabled() && questionText.trim()) {
+    const sid = String(sessionId);
+    for (const a of analyzed) {
+      if (a.kind === "image") continue;
+      try {
+        const db = await findIndexedAttachment({
+          sessionId: sid,
+          filename: a.filename,
+          size: a.size,
+          mimeType: a.mimeType,
+        });
+        // Kecil → teks lengkap inline lebih baik (exact). Baru retrieve kalau beneran besar.
+        if (!db || db._count.chunks < RETRIEVAL_MIN_CHUNKS) continue;
+        const hits = await retrieveChunks({
+          sessionId: sid,
+          attachmentId: db.id,
+          question: questionText,
+          topK: RETRIEVAL_TOP_K,
+        });
+        if (hits.length === 0) continue;
+        retrievalMap.set(
+          a.filename,
+          hits
+            .map(
+              (h) =>
+                `[Dokumen: ${h.filename} — halaman ${h.pageStart}` +
+                (h.pageEnd !== h.pageStart ? `-${h.pageEnd}` : "") +
+                `]\n${h.text}`
+            )
+            .join("\n\n")
+        );
+      } catch (err) {
+        console.error(`[Retrieval] gagal buat "${a.filename}":`, err);
+      }
+    }
+  }
+
   // ─── Resolve PDF scan: render halaman → vision, atau → OCR service ──
   // Document Router udah nge-route di analyzeFile (route: native/vision/ocr).
   // native → teks langsung (jalur default). Di sini cuma handle yang
   // butuh render: vision → gambar halaman; ocr → PaddleOCR (fallback vision).
+  // PDF yang udah ke-index & di-handle via retrievalMap di-skip — gak perlu
+  // render/OCR ulang.
   const OCR_BASE_URL = process.env.OCR_BASE_URL?.trim();
   const OCR_LANG = process.env.OCR_LANGUAGE?.trim() || "ch";
   const maxPages = getMaxVisionPdfPages();
 
   const resolvedPdfs: ResolvedPdf[] = [];
   for (const a of analyzed.filter(
-    (x) => x.kind === "pdf" && x.route && x.route !== "native"
+    (x) =>
+      x.kind === "pdf" &&
+      x.route &&
+      x.route !== "native" &&
+      !retrievalMap.has(x.filename)
   )) {
     try {
       const pages = await renderPdfPages(a.data, { maxPages });
@@ -251,6 +314,9 @@ export async function POST(req: NextRequest) {
       replyPrefix,
       attachments: analyzed,
       resolvedPdfs,
+      retrievalContext: [...retrievalMap.values()].join("\n\n"),
+      retrievalNames:
+        retrievalMap.size > 0 ? new Set(retrievalMap.keys()) : undefined,
     });
 
     if (parts.length === 0) {
