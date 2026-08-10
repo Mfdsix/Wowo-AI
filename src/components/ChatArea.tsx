@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
+import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
@@ -57,23 +57,48 @@ const INDEX_STATUS_LABEL: Record<string, string> = {
 
 function AttachmentIndexChip({ att }: { att: AttachmentMeta }) {
   if (!att.status) return null;
-  const isProcessing = (PROCESSING_STATUSES as readonly string[]).includes(att.status);
-  const chipClass =
-    att.status === "failed"
-      ? "bg-red-500/20 text-red-300"
-      : att.status === "ready"
-        ? "bg-emerald-500/20 text-emerald-300"
-        : "bg-sky-500/20 text-sky-300";
+
+  // Siap → hijau + ringkasan (jumlah halaman / chunk hasil index)
+  if (att.status === "ready") {
+    const summary = att.pageCount
+      ? `Siap · ${att.pageCount} hal`
+      : att.chunkCount
+        ? `Siap · ${att.chunkCount} chunk`
+        : "Siap";
+    return (
+      <span
+        className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-emerald-500/20 text-emerald-300"
+        title={att.chunkCount ? `${att.chunkCount} chunk ter-index` : "ter-index"}
+      >
+        <Check size={9} className="text-emerald-300" />
+        {summary}
+      </span>
+    );
+  }
+
+  // Gagal → merah + error di tooltip
+  if (att.status === "failed") {
+    return (
+      <span
+        className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-red-500/20 text-red-300"
+        title={att.error ?? "gagal di-index"}
+      >
+        <X size={9} />
+        Gagal
+      </span>
+    );
+  }
+
+  // Processing (pending/extracting/ocr/indexing) → biru + spinner + stage + %
   const label = INDEX_STATUS_LABEL[att.status] ?? att.status;
   const progress =
-    isProcessing && typeof att.progress === "number" && att.progress > 0
-      ? ` ${att.progress}%`
-      : "";
+    typeof att.progress === "number" && att.progress > 0 ? ` ${att.progress}%` : "";
   return (
     <span
-      className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${chipClass}`}
-      title={att.status === "failed" ? (att.error ?? "gagal di-index") : undefined}
+      className="inline-flex shrink-0 animate-pulse items-center gap-1 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-sky-500/20 text-sky-300"
+      title={`Index dokumen: ${label}`}
     >
+      <Loader2 size={9} className="animate-spin" />
       {label}
       {progress}
     </span>
@@ -303,37 +328,55 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
       {/* Attachments — icon tipe file, di ATAS bubble */}
       {isUser && message.attachments && message.attachments.length > 0 && (
         <div className="flex flex-wrap justify-end gap-2 max-w-[85%] px-4 pt-2">
-          {message.attachments.map((att) => (
-            <button
-              key={att.id}
-              type="button"
-              onClick={() => onPreviewAttachment?.(att)}
-              className="flex items-center gap-1.5 rounded-md bg-white/10 px-2 py-1 text-xs text-white/90 min-w-0
-                         hover:bg-white/20 hover:text-white transition-colors duration-150 cursor-pointer"
-              title={`${att.filename} (${att.mimeType}) — klik buat preview`}
-            >
-              <FileTypeIcon mimeType={att.mimeType} size={13} className="shrink-0" />
-              <span className="truncate max-w-[160px]">{att.filename}</span>
-              {/* Badge route Document Router — cuma PDF punya route */}
-              {att.route && (
-                <span
-                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${
-                    att.route === "native"
-                      ? "bg-emerald-500/20 text-emerald-300"
-                      : "bg-amber-500/20 text-amber-300"
-                  }`}
-                >
-                  {att.route === "native"
-                    ? "native"
-                    : att.route === "ocr"
-                    ? "ocr"
-                    : "scan→vision"}
+          {message.attachments.map((att) => {
+            const isIndexing =
+              !!att.status &&
+              (PROCESSING_STATUSES as readonly string[]).includes(att.status);
+            return (
+              <button
+                key={att.id}
+                type="button"
+                onClick={() => onPreviewAttachment?.(att)}
+                className="flex flex-col rounded-md bg-white/10 px-2 py-1 text-xs text-white/90 min-w-0
+                           hover:bg-white/20 hover:text-white transition-colors duration-150 cursor-pointer"
+                title={`${att.filename} (${att.mimeType}) — klik buat preview`}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FileTypeIcon mimeType={att.mimeType} size={13} className="shrink-0" />
+                  <span className="truncate max-w-[160px]">{att.filename}</span>
+                  {/* Badge route Document Router — cuma PDF punya route */}
+                  {att.route && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${
+                        att.route === "native"
+                          ? "bg-emerald-500/20 text-emerald-300"
+                          : "bg-amber-500/20 text-amber-300"
+                      }`}
+                    >
+                      {att.route === "native"
+                        ? "native"
+                        : att.route === "ocr"
+                        ? "ocr"
+                        : "scan→vision"}
+                    </span>
+                  )}
+                  {/* Status Document Intelligence pipeline — index dokumen */}
+                  {att.status && <AttachmentIndexChip att={att} />}
                 </span>
-              )}
-              {/* Status Document Intelligence pipeline — index dokumen */}
-              {att.status && <AttachmentIndexChip att={att} />}
-            </button>
-          ))}
+                {/* Progress bar — animasi selagi dokumen ke-index di background */}
+                {isIndexing && (
+                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-full bg-white/10">
+                    <span
+                      className="block h-full rounded-full bg-sky-400 transition-all duration-500 ease-out"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, att.progress ?? 0))}%`,
+                      }}
+                    />
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
       <div
@@ -403,6 +446,22 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
               )}
             </div>
           </div>
+
+          {/* Sumber RAG — dokumen + halaman yang dipake AI buat jawab */}
+          {!isUser && message.sources && message.sources.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5 pl-1">
+              {message.sources.map((s, i) => (
+                <span
+                  key={`${s.filename}-${i}`}
+                  className="inline-flex items-center gap-1 rounded bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  title="Sumber retrieval — halaman dokumen yang dipake buat jawab"
+                >
+                  <FileText size={10} className="shrink-0" />
+                  {s.filename} · hal. {s.pages}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

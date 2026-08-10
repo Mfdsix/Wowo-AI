@@ -5,7 +5,7 @@ import { LayoutDashboard, MessagesSquare } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput, { type PendingFile } from "@/components/MessageInput";
-import type { Message, ReplyTarget, AttachmentMeta } from "@/lib/types";
+import type { Message, ReplyTarget, AttachmentMeta, RetrievalSource } from "@/lib/types";
 import DesignerCanvas from "@/components/DesignerCanvas";
 import DesignerPrompt from "@/components/DesignerPrompt";
 
@@ -21,6 +21,17 @@ type Session = {
 // Client-side caps — mirror caps di src/lib/attachments.ts
 const MAX_CLIENT_FILES = 10;
 const MAX_CLIENT_BYTES = 10 * 1024 * 1024; // 10 MB
+
+// Parse header x-retrieval-sources (filename + halaman) → undefined kalau kosong/rusak
+function parseSources(header: string | null): RetrievalSource[] | undefined {
+  if (!header) return undefined;
+  try {
+    const parsed = JSON.parse(header) as unknown;
+    return Array.isArray(parsed) ? (parsed as RetrievalSource[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type DesignerPage = {
   id: string;
@@ -393,6 +404,10 @@ export default function Home() {
     const abortController = new AbortController();
     abortRef.current = abortController;
 
+    // Sumber RAG dari header x-retrieval-sources — di-declare di luar try biar
+    // accessible di catch (abort partial) juga.
+    let sources: RetrievalSource[] | undefined;
+
     try {
       const chatForm = new FormData();
       chatForm.append(
@@ -436,6 +451,9 @@ export default function Home() {
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
+      // Sumber RAG (dokumen + halaman) yang dipake AI buat jawab
+      sources = parseSources(res.headers.get("x-retrieval-sources"));
+
       // 5. Read streaming response
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
@@ -447,7 +465,7 @@ export default function Home() {
       // Add placeholder assistant message
       setMessages((prev) => [
         ...prev,
-        { id: assistantId, role: "assistant", content: "" },
+        { id: assistantId, role: "assistant", content: "", sources },
       ]);
 
       while (true) {
@@ -474,8 +492,11 @@ export default function Home() {
           modelName
         );
         if (savedAssistantMsg) {
+          // Pertahankan sources (gak di-persist di DB, cuma di state)
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? savedAssistantMsg : m))
+            prev.map((m) =>
+              m.id === assistantId ? { ...savedAssistantMsg, sources } : m
+            )
           );
         }
       }
@@ -488,7 +509,7 @@ export default function Home() {
           const saved = await saveMessage(activeSessionId, "assistant", partialMsg.content);
           if (saved) {
             setMessages((prev) =>
-              prev.map((m) => (m.id === partialMsg.id ? saved : m))
+              prev.map((m) => (m.id === partialMsg.id ? { ...saved, sources } : m))
             );
           }
         }
@@ -565,6 +586,8 @@ export default function Home() {
     const abortController = new AbortController();
     abortRef.current = abortController;
 
+    let sources: RetrievalSource[] | undefined;
+
     try {
       const chatForm = new FormData();
       chatForm.append(
@@ -606,6 +629,8 @@ export default function Home() {
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
+      sources = parseSources(res.headers.get("x-retrieval-sources"));
+
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
 
@@ -613,7 +638,7 @@ export default function Home() {
       const assistantId = `assist-${crypto.randomUUID()}`;
       let assistantContent = "";
 
-      setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources }]);
 
       while (true) {
         const { done, value } = await reader.read();

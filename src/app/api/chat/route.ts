@@ -28,11 +28,30 @@ import {
   RETRIEVAL_MIN_CHUNKS,
   RETRIEVAL_TOP_K,
 } from "@/lib/retrieval";
+import type { RetrievalSource } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// Gabung halaman chunk jadi string singkat buat kutip sumber.
+// Contoh: [1,2,3,3,5,7] → "1-3, 5, 7"
+function summarizePages(
+  hits: Array<{ pageStart: number; pageEnd: number }>
+): string {
+  const ranges: Array<[number, number]> = [];
+  const sorted = [...hits].sort((a, b) => a.pageStart - b.pageStart);
+  for (const h of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && h.pageStart <= last[1] + 1) {
+      last[1] = Math.max(last[1], h.pageEnd);
+    } else {
+      ranges.push([h.pageStart, h.pageEnd]);
+    }
+  }
+  return ranges.map(([s, e]) => (s === e ? `${s}` : `${s}-${e}`)).join(", ");
 }
 
 // Deteksi error "model/server gak support function calling" biar bisa retry tanpa tools
@@ -148,6 +167,7 @@ export async function POST(req: NextRequest) {
       : "";
   })();
   const retrievalMap = new Map<string, string>(); // filename → kutipan retrieved
+  const sources: RetrievalSource[] = []; // filename → halaman (dikirim via header x-retrieval-sources)
   if (sessionId && embeddingEnabled() && questionText.trim()) {
     const sid = String(sessionId);
     for (const a of analyzed) {
@@ -168,6 +188,7 @@ export async function POST(req: NextRequest) {
           topK: RETRIEVAL_TOP_K,
         });
         if (hits.length === 0) continue;
+        sources.push({ filename: a.filename, pages: summarizePages(hits) });
         retrievalMap.set(
           a.filename,
           hits
@@ -541,6 +562,9 @@ export async function POST(req: NextRequest) {
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
         "x-llm-model": modelName,
+        // Sumber RAG (filename + halaman) — client nampilin note di bawah jawaban
+        "x-retrieval-sources":
+          sources.length > 0 ? JSON.stringify(sources) : "",
       },
     });
   } catch (error) {
