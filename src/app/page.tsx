@@ -115,7 +115,7 @@ export default function Home() {
   const designerSubmitRef = useRef<((prompt: string) => Promise<void>) | null>(null);
 
   // ─── Podcast mode state ────────────────────────────────────────
-  const [podcastStatus, setPodcastStatus] = useState<"idle" | "running" | "stopped">("idle");
+  const [podcastStatus, setPodcastStatus] = useState<"idle" | "running" | "paused" | "stopped">("idle");
   const [podcastTurnCount, setPodcastTurnCount] = useState(0);
   const [podcastConfig, setPodcastConfig] = useState<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
   const [podcastActiveSpeaker, setPodcastActiveSpeaker] = useState<Speaker | null>(null);
@@ -127,7 +127,7 @@ export default function Home() {
   // Refs: source of truth buat loop async biar gak kena stale-closure.
   // Status/turnCount/config dibaca dari sini, state cuma buat render.
   const podcastStateRef = useRef({
-    status: "idle" as "idle" | "running" | "stopped",
+    status: "idle" as "idle" | "running" | "paused" | "stopped",
     turnCount: 0,
     config: DEFAULT_PODCAST_CONFIG,
   });
@@ -137,6 +137,8 @@ export default function Home() {
   const podcastTurnAbortRef = useRef<AbortController | null>(null);
   const podcastStopRequestedRef = useRef(false);
   const podcastAudioRef = useRef<HTMLAudioElement | null>(null);
+  // resolve dari turn yang lagi main — dipanggil pas pause/stop biar await gak nge-gantung.
+  const podcastAudioResolveRef = useRef<((ok: boolean) => void) | null>(null);
   const pendingAudioRef = useRef<{ url: string; resolve: (ok: boolean) => void } | null>(null);
   const podcastConfigRef = useRef<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
   const podcastMessagesRef = useRef<Message[]>([]);
@@ -617,9 +619,11 @@ export default function Home() {
       const audio = new Audio(url);
       podcastAudioRef.current?.pause();
       podcastAudioRef.current = audio;
+      podcastAudioResolveRef.current = resolve;
       const finish = (ok: boolean) => {
         URL.revokeObjectURL(url);
         if (podcastAudioRef.current === audio) podcastAudioRef.current = null;
+        if (podcastAudioResolveRef.current === resolve) podcastAudioResolveRef.current = null;
         if (pendingAudioRef.current?.url === url) pendingAudioRef.current = null;
         resolve(ok);
       };
@@ -739,7 +743,20 @@ export default function Home() {
       }
       decoder.decode();
     } catch (err) {
-      if (abort.signal.aborted) return; // user stop
+      if (abort.signal.aborted) {
+        // Stop = selesai. Pause = rollback turn yang ke-interupsi biar
+        // nanti dilanjutin tanpa ke-skip gilirannya.
+        if (podcastStateRef.current.status === "paused") {
+          podcastStateRef.current = {
+            ...podcastStateRef.current,
+            turnCount: Math.max(0, podcastStateRef.current.turnCount - 1),
+          };
+        }
+        // Bersihin bubble temp yang belum ke-persist biar gak nyangkut kosong.
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        setPodcastStreamingId(null);
+        return;
+      }
       console.error("podcast turn error:", err);
       fullText += `\n\n_❌ ${err instanceof Error ? err.message : String(err)}_`;
     } finally {
@@ -846,21 +863,27 @@ export default function Home() {
     const sessionId = podcastSessionIdRef.current;
     if (!sessionId) return;
     podcastStopRequestedRef.current = false;
-    const existing = podcastMessagesRef.current.filter(
-      (m) =>
-        m.role === "assistant" &&
-        m.speaker &&
-        !m.id.startsWith("temp-") &&
-        !m.id.startsWith("assist-") &&
-        !m.id.startsWith("error-")
-    ).length;
+    const st = podcastStateRef.current;
+    let turnCount = st.turnCount;
+    // Resume dari paused → lanjut di posisi yang sama (turnCount udah bener).
+    // Resume dari stopped/idle → hitung ulang dari transkrip.
+    if (st.status === "stopped" || st.status === "idle") {
+      turnCount = podcastMessagesRef.current.filter(
+        (m) =>
+          m.role === "assistant" &&
+          m.speaker &&
+          !m.id.startsWith("temp-") &&
+          !m.id.startsWith("assist-") &&
+          !m.id.startsWith("error-")
+      ).length;
+    }
     podcastStateRef.current = {
       status: "running",
-      turnCount: existing,
+      turnCount,
       config: podcastConfigRef.current,
     };
     setPodcastStatus("running");
-    setPodcastTurnCount(existing);
+    setPodcastTurnCount(turnCount);
     await podcastNextTurn();
   }, [podcastNextTurn]);
 
@@ -911,6 +934,27 @@ export default function Home() {
     setPodcastStatus("stopped");
     podcastTurnAbortRef.current?.abort();
     podcastAudioRef.current?.pause();
+    podcastAudioResolveRef.current?.(false);
+    podcastAudioResolveRef.current = null;
+    const pending = pendingAudioRef.current;
+    if (pending) {
+      pending.resolve(false);
+      pendingAudioRef.current = null;
+    }
+    setPodcastNeedsGesture(false);
+    setPodcastStreamingId(null);
+    setPodcastPlayingId(null);
+  }, []);
+
+  // Pause — berhenti di tempat (audio + turn yang lagi jalan di-jeda),
+  // lanjut nanti dari posisi yang sama tanpa kehilangan konteks.
+  const handlePausePodcast = useCallback(() => {
+    podcastStateRef.current = { ...podcastStateRef.current, status: "paused" };
+    setPodcastStatus("paused");
+    podcastTurnAbortRef.current?.abort();
+    podcastAudioRef.current?.pause();
+    podcastAudioResolveRef.current?.(false);
+    podcastAudioResolveRef.current = null;
     const pending = pendingAudioRef.current;
     if (pending) {
       pending.resolve(false);
@@ -1602,6 +1646,7 @@ export default function Home() {
             onSendNote={handlePodcastNote}
             onStart={handleStartPodcast}
             onResume={handleResumePodcast}
+            onPause={handlePausePodcast}
             onReplay={handleReplayPodcast}
             onStop={handleStopPodcast}
             onResumeGesture={resumePodcastAudio}

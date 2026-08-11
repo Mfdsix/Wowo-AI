@@ -5,6 +5,7 @@ import {
   Mic,
   Play,
   Pause,
+  Square,
   Send,
   Volume2,
   Sparkles,
@@ -19,7 +20,7 @@ type PodcastAreaProps = {
   sessionTitle?: string;
   messages: Message[];
   podcastConfig: PodcastConfig;
-  podcastStatus: "idle" | "running" | "stopped";
+  podcastStatus: "idle" | "running" | "paused" | "stopped";
   podcastTurnCount: number;
   podcastActiveSpeaker: Speaker | null;
   podcastStreamingId: string | null;
@@ -31,6 +32,7 @@ type PodcastAreaProps = {
   onSendNote: () => void;
   onStart: (topic: string, config: PodcastConfig) => void;
   onResume: () => void;
+  onPause: () => void;
   onReplay: () => void;
   onStop: () => void;
   onResumeGesture: () => void;
@@ -122,6 +124,7 @@ export default function PodcastArea({
   onSendNote,
   onStart,
   onResume,
+  onPause,
   onReplay,
   onStop,
   onResumeGesture,
@@ -259,19 +262,51 @@ export default function PodcastArea({
               LIVE · {podcastConfig.names[podcastActiveSpeaker] ?? "Giliran"} lagi bicara
             </span>
           )}
+          {podcastStatus === "paused" && (
+            <span className="flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+              PAUSED
+            </span>
+          )}
           <span className="text-[11px] text-zinc-500">
             Giliran {podcastTurnCount}/{podcastConfig.maxTurns}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {running ? (
-            <button
-              onClick={onStop}
-              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-            >
-              <Pause size={13} />
-              Stop
-            </button>
+          {podcastStatus === "running" ? (
+            <>
+              <button
+                onClick={onPause}
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+              >
+                <Pause size={13} />
+                Pause
+              </button>
+              <button
+                onClick={onStop}
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+              >
+                <Square size={13} />
+                Stop
+              </button>
+            </>
+          ) : podcastStatus === "paused" ? (
+            <>
+              <button
+                onClick={onResume}
+                className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+              >
+                <Play size={13} />
+                Lanjut
+              </button>
+              <button
+                onClick={onStop}
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+              >
+                <Square size={13} />
+                Stop
+              </button>
+            </>
           ) : (
             hasTurns && (
               <>
