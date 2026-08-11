@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { MessageSquarePlus, Trash2, MessageSquare, Loader2, PenLine } from "lucide-react";
+import { MessageSquarePlus, Trash2, MessageSquare, Loader2, PenLine, Mic } from "lucide-react";
 
 type Session = {
   id: string;
   title: string;
+  mode?: string;
   createdAt: string;
   updatedAt: string;
   _count: { messages: number };
@@ -84,7 +85,11 @@ export default function Sidebar({
               }`}
               onClick={() => onSelectSession(session.id)}
             >
-              <MessageSquare size={16} className="shrink-0" />
+              {session.mode === "podcast" ? (
+                <Mic size={16} className="shrink-0 text-indigo-400" />
+              ) : (
+                <MessageSquare size={16} className="shrink-0" />
+              )}
               {editingId === session.id ? (
                 <input
                   autoFocus

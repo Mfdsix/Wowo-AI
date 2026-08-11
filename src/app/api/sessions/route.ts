@@ -9,6 +9,8 @@ export async function GET() {
       id: true,
       title: true,
       designStyle: true,
+      mode: true,
+      podcastConfig: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },
@@ -23,13 +25,21 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const title = body.title || "New Chat";
   const designStyle = typeof body.designStyle === "string" ? body.designStyle : null;
+  const mode =
+    typeof body.mode === "string" &&
+    ["chat", "designer", "podcast"].includes(body.mode)
+      ? body.mode
+      : "chat";
+  const podcastConfig =
+    typeof body.podcastConfig === "string" ? body.podcastConfig : null;
 
   const session = await prisma.session.create({
-    data: { title, designStyle },
+    data: { title, designStyle, mode, podcastConfig },
     select: {
       id: true,
       title: true,
       designStyle: true,
+      mode: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },

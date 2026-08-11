@@ -16,6 +16,7 @@ export async function GET(
       role: true,
       content: true,
       model: true,
+      speaker: true,
       bookmarked: true,
       replyToId: true,
       quoteText: true,
@@ -74,7 +75,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const { role, content, model, bookmarked, replyToId, quoteText } = await req.json();
+  const { role, content, model, speaker, bookmarked, replyToId, quoteText } =
+    await req.json();
 
   if (!role || !content) {
     return NextResponse.json(
@@ -89,6 +91,7 @@ export async function POST(
       role,
       content,
       model: model || null,
+      speaker: speaker || null,
       bookmarked: bookmarked ?? false,
       replyToId: replyToId || null,
       quoteText: quoteText || null,

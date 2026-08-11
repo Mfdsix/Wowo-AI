@@ -12,6 +12,8 @@ model Session {
   id             String          @id @default(cuid())
   title          String          @default("New Chat")
   designStyle    String?         // NeedMCP style slug yang di-lock (e.g. "modern")
+  mode           String          @default("chat") // "chat" | "designer" | "podcast"
+  podcastConfig  String?         // JSON: { speakerNames, voices, maxTurns } buat resume podcast
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   messages       Message[]
@@ -26,6 +28,7 @@ model Message {
   role        String       // "user" | "assistant"
   content     String
   model       String?      // nama model yang dipake (optional)
+  speaker     String?      // "host" | "guestA" | "guestB" — khusus giliran on-air podcast
   bookmarked  Boolean      @default(false)
   replyToId   String?      // referensi pesan yang di-reply (quote)
   quoteText   String?      // teks spesifik yang di-quote (highlight)
