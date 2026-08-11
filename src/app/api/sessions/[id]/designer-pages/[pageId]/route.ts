@@ -19,7 +19,10 @@ export async function PATCH(
 
   const { name, html, revertToVersionId } = await req.json();
 
-  const versions: any[] = Array.isArray(existing.versions) ? existing.versions : [];
+  type PageVersion = { id: string; html: string; updatedAt: string };
+  const versions: PageVersion[] = Array.isArray(existing.versions)
+    ? (existing.versions as unknown as PageVersion[])
+    : [];
 
   // ─── REVERT ke versi tertentu ───
   if (revertToVersionId) {

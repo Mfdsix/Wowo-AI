@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { LayoutDashboard, MessagesSquare } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
-import MessageInput from "@/components/MessageInput";
+import MessageInput, { type PendingFile } from "@/components/MessageInput";
+import type { Message, ReplyTarget, AttachmentMeta, RetrievalSource } from "@/lib/types";
 import DesignerCanvas from "@/components/DesignerCanvas";
 import DesignerPrompt from "@/components/DesignerPrompt";
 
@@ -17,24 +18,20 @@ type Session = {
   _count: { messages: number };
 };
 
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  model?: string | null;
-  bookmarked?: boolean;
-  replyToId?: string | null;
-  quoteText?: string | null;
-  createdAt?: string;
-};
+// Client-side caps — mirror caps di src/lib/attachments.ts
+const MAX_CLIENT_FILES = 10;
+const MAX_CLIENT_BYTES = 10 * 1024 * 1024; // 10 MB
 
-// Target referensi buat reply/quote
-type ReplyTarget = {
-  id: string;
-  content: string;
-  role?: string;
-  quoteText?: string;
-};
+// Parse header x-retrieval-sources (filename + halaman) → undefined kalau kosong/rusak
+function parseSources(header: string | null): RetrievalSource[] | undefined {
+  if (!header) return undefined;
+  try {
+    const parsed = JSON.parse(header) as unknown;
+    return Array.isArray(parsed) ? (parsed as RetrievalSource[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type DesignerPage = {
   id: string;
@@ -93,6 +90,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [viewMode, setViewMode] = useState<"chat" | "designer">("chat");
   const [designerPages, setDesignerPages] = useState<DesignerPage[]>([]);
   const [activePageId, setActivePageId] = useState<string | null>(null);
@@ -130,6 +128,11 @@ export default function Home() {
       console.error("fetchMessages error:", err);
     }
   }, []);
+
+  // Refetch buat UI poll progress index attachment (ChatArea).
+  const refreshMessages = useCallback(() => {
+    if (activeSessionId) void fetchMessages(activeSessionId);
+  }, [activeSessionId, fetchMessages]);
 
   // ─── Save a message ────────────────────────────────────────
   const saveMessage = useCallback(
@@ -284,16 +287,50 @@ export default function Home() {
     [sessions, activeSessionId, fetchMessages]
   );
 
+  // ─── File attachment ────────────────────────────────────────
+  const handleAddFiles = useCallback((fileList: FileList | File[]) => {
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) return;
+
+    setPendingFiles((prev) => {
+      const room = Math.max(0, MAX_CLIENT_FILES - prev.length);
+      const oversized = incoming.filter((f) => f.size > MAX_CLIENT_BYTES);
+      if (oversized.length > 0) {
+        console.warn(
+          `Lewati file >${MAX_CLIENT_BYTES / 1024 / 1024}MB:`,
+          oversized.map((f) => f.name)
+        );
+      }
+      const toAdd = incoming.filter((f) => f.size <= MAX_CLIENT_BYTES).slice(0, room);
+
+      const items: PendingFile[] = toAdd.map((f) => ({
+        id: crypto.randomUUID(),
+        file: f,
+      }));
+      return [...prev, ...items];
+    });
+  }, []);
+
+  const handleRemoveFile = useCallback((id: string) => {
+    setPendingFiles((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  const clearPendingFiles = useCallback(() => {
+    setPendingFiles([]);
+  }, []);
+
   // ─── Send message ───────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     const trimmed = input.trim();
-    if (!trimmed || !activeSessionId || isLoading) return;
+    if ((!trimmed && pendingFiles.length === 0) || !activeSessionId || isLoading) return;
 
     const userContent = trimmed;
-    // Capture reply reference sebelum di-clear
+    // Capture reply reference & files sebelum di-clear
     const activeReply = replyTarget;
+    const files = pendingFiles;
     setInput("");
     setReplyTarget(null);
+    clearPendingFiles();
 
     // 1. Add user message to UI immediately
     const tempUserMsg: Message = {
@@ -302,6 +339,7 @@ export default function Home() {
       content: userContent,
       replyToId: activeReply?.id || null,
       quoteText: activeReply?.quoteText || null,
+      attachments: [],
     };
     setMessages((prev) => [...prev, tempUserMsg]);
     setIsLoading(true);
@@ -317,9 +355,35 @@ export default function Home() {
       activeReply?.id || null,
       activeReply?.quoteText || null
     );
+
+    // 2b. Upload attachments ke pesan yang barusan disimpan
+    let attachmentMeta: AttachmentMeta[] = [];
+    if (files.length > 0 && savedUserMsg) {
+      try {
+        const upForm = new FormData();
+        files.forEach((f) => upForm.append("files", f.file));
+        const upRes = await fetch(
+          `/api/sessions/${activeSessionId}/messages/${savedUserMsg.id}/attachments`,
+          { method: "POST", body: upForm }
+        );
+        if (upRes.ok) {
+          attachmentMeta = (await upRes.json()) as AttachmentMeta[];
+        } else {
+          console.error("Upload attachments failed:", upRes.status);
+        }
+      } catch (err) {
+        console.error("Upload attachments error:", err);
+      }
+    }
+
+    // Ganti placeholder temp- dengan pesan asli (regenerate butuh message id real)
     if (savedUserMsg) {
       setMessages((prev) =>
-        prev.map((m) => (m.id === tempUserMsg.id ? savedUserMsg : m))
+        prev.map((m) =>
+          m.id === tempUserMsg.id
+            ? { ...savedUserMsg, attachments: attachmentMeta }
+            : m
+        )
       );
     }
 
@@ -340,33 +404,45 @@ export default function Home() {
     const abortController = new AbortController();
     abortRef.current = abortController;
 
+    // Sumber RAG dari header x-retrieval-sources — di-declare di luar try biar
+    // accessible di catch (abort partial) juga.
+    let sources: RetrievalSource[] | undefined;
+
     try {
+      const chatForm = new FormData();
+      chatForm.append(
+        "messages",
+        JSON.stringify([
+          ...messages.filter(
+            (m) =>
+              !m.id.startsWith("temp-") &&
+              !m.id.startsWith("assist-") &&
+              !m.id.startsWith("error-")
+          ),
+          { role: "user", content: userContent },
+        ])
+      );
+      chatForm.append("sessionId", activeSessionId);
+      chatForm.append(
+        "designStyle",
+        sessions.find((s) => s.id === activeSessionId)?.designStyle ?? ""
+      );
+      // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
+      // Quote → pake teks yang di-highlight; Reply → pake isi pesan
+      if (activeReply) {
+        chatForm.append(
+          "replyTo",
+          JSON.stringify({
+            id: activeReply.id,
+            content: activeReply.quoteText || activeReply.content,
+          })
+        );
+      }
+      files.forEach((f) => chatForm.append("files", f.file));
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            // Cuma kirim pesan real (bukan placeholder temp/assist/error)
-            ...messages.filter(
-              (m) =>
-                !m.id.startsWith("temp-") &&
-                !m.id.startsWith("assist-") &&
-                !m.id.startsWith("error-")
-            ),
-            { role: "user" as const, content: userContent },
-          ],
-          sessionId: activeSessionId,
-          designStyle:
-            sessions.find((s) => s.id === activeSessionId)?.designStyle ?? null,
-          // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
-          // Quote → pake teks yang di-highlight; Reply → pake isi pesan
-          replyTo: activeReply
-            ? {
-                id: activeReply.id,
-                content: activeReply.quoteText || activeReply.content,
-              }
-            : undefined,
-        }),
+        body: chatForm,
         signal: abortController.signal,
       });
 
@@ -374,6 +450,9 @@ export default function Home() {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
+
+      // Sumber RAG (dokumen + halaman) yang dipake AI buat jawab
+      sources = parseSources(res.headers.get("x-retrieval-sources"));
 
       // 5. Read streaming response
       const reader = res.body?.getReader();
@@ -386,7 +465,7 @@ export default function Home() {
       // Add placeholder assistant message
       setMessages((prev) => [
         ...prev,
-        { id: assistantId, role: "assistant", content: "" },
+        { id: assistantId, role: "assistant", content: "", sources },
       ]);
 
       while (true) {
@@ -405,14 +484,19 @@ export default function Home() {
 
       // 6. Save assistant message ke DB, ganti placeholder assist- dengan pesan asli
       if (assistantContent) {
+        const modelName = res.headers.get("x-llm-model") || undefined;
         const savedAssistantMsg = await saveMessage(
           activeSessionId,
           "assistant",
-          assistantContent
+          assistantContent,
+          modelName
         );
         if (savedAssistantMsg) {
+          // Pertahankan sources (gak di-persist di DB, cuma di state)
           setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? savedAssistantMsg : m))
+            prev.map((m) =>
+              m.id === assistantId ? { ...savedAssistantMsg, sources } : m
+            )
           );
         }
       }
@@ -425,7 +509,7 @@ export default function Home() {
           const saved = await saveMessage(activeSessionId, "assistant", partialMsg.content);
           if (saved) {
             setMessages((prev) =>
-              prev.map((m) => (m.id === partialMsg.id ? saved : m))
+              prev.map((m) => (m.id === partialMsg.id ? { ...saved, sources } : m))
             );
           }
         }
@@ -446,7 +530,7 @@ export default function Home() {
       abortRef.current = null;
       fetchSessions();
     }
-  }, [input, activeSessionId, isLoading, messages, replyTarget, sessions, saveMessage, updateSessionTitle, fetchSessions]);
+  }, [input, activeSessionId, isLoading, messages, replyTarget, pendingFiles, clearPendingFiles, sessions, saveMessage, updateSessionTitle, fetchSessions]);
 
   // ─── Regenerate response ──────────────────────────────────
   const handleRegenerate = useCallback(async () => {
@@ -476,6 +560,10 @@ export default function Home() {
       return newMsgs;
     });
 
+    // Pesan user terakhir dari state (untuk re-attach files saat regenerate)
+    const lastUserMsg: Message | null =
+      [...messages].reverse().find((m) => m.role === "user") ?? null;
+
     // Hapus dari DB kalo id-nya real (bukan temp-)
     if (lastAssistantId && !lastAssistantId.startsWith("temp-") && !lastAssistantId.startsWith("assist-")) {
       try {
@@ -498,16 +586,41 @@ export default function Home() {
     const abortController = new AbortController();
     abortRef.current = abortController;
 
+    let sources: RetrievalSource[] | undefined;
+
     try {
+      const chatForm = new FormData();
+      chatForm.append(
+        "messages",
+        JSON.stringify([...historyForApi, { role: "user", content: lastUserContent }])
+      );
+      chatForm.append("sessionId", activeSessionId);
+      chatForm.append(
+        "designStyle",
+        sessions.find((s) => s.id === activeSessionId)?.designStyle ?? ""
+      );
+
+      // Re-attach files dari pesan user terakhir (fetch bytes on-demand)
+      if (lastUserMsg?.attachments?.length) {
+        await Promise.all(
+          lastUserMsg.attachments.map(async (att) => {
+            try {
+              const dataRes = await fetch(
+                `/api/sessions/${activeSessionId}/attachments/${att.id}/data`
+              );
+              if (!dataRes.ok) return;
+              const blob = await dataRes.blob();
+              chatForm.append("files", new File([blob], att.filename, { type: att.mimeType }));
+            } catch (err) {
+              console.error("Fetch attachment data error:", err);
+            }
+          })
+        );
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [...historyForApi, { role: "user" as const, content: lastUserContent }],
-          sessionId: activeSessionId,
-          designStyle:
-            sessions.find((s) => s.id === activeSessionId)?.designStyle ?? null,
-        }),
+        body: chatForm,
         signal: abortController.signal,
       });
 
@@ -516,6 +629,8 @@ export default function Home() {
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
+      sources = parseSources(res.headers.get("x-retrieval-sources"));
+
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
 
@@ -523,7 +638,7 @@ export default function Home() {
       const assistantId = `assist-${crypto.randomUUID()}`;
       let assistantContent = "";
 
-      setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -634,24 +749,20 @@ export default function Home() {
     }, 50);
   }, [messages]);
 
-  // ─── Designer: fetch pages utk session ─────────────────────
-  const fetchDesignerPages = useCallback(async (sessionId: string) => {
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/designer-pages`);
-      if (!res.ok) throw new Error("Failed to fetch designer pages");
-      const data: DesignerPage[] = await res.json();
-      setDesignerPages(data);
-    } catch (err) {
-      console.error("fetchDesignerPages error:", err);
-    }
-  }, []);
-
   // Load designer pages pas masuk designer mode / ganti session
   useEffect(() => {
-    if (viewMode === "designer" && activeSessionId) {
-      fetchDesignerPages(activeSessionId);
-    }
-  }, [viewMode, activeSessionId, fetchDesignerPages]);
+    if (viewMode !== "designer" || !activeSessionId) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${activeSessionId}/designer-pages`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: DesignerPage[]) => {
+        if (!cancelled) setDesignerPages(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, activeSessionId]);
 
   // Fetch NeedMCP styles buat style picker (cuma pas masuk designer mode)
   useEffect(() => {
@@ -969,9 +1080,20 @@ export default function Home() {
         abortRef.current = null;
       }
     },
-    [activeSessionId, isDesignerLoading, designerPages, activePageId, sessions]
+    [activeSessionId, isDesignerLoading, designerPages, activePageId, activeSection, messages, sessions]
   );
-  designerSubmitRef.current = handleDesignerSubmit;
+
+  // Assign ref di dalam effect — React 19 gak boleh nulis ref saat render
+  useEffect(() => {
+    designerSubmitRef.current = handleDesignerSubmit;
+  }, [handleDesignerSubmit]);
+
+  // Designer mode cuma muncul kalau ada UI yang ke-generate di chat
+  // (assistant message berisi ```html, atau udah ada designer page)
+  const hasGeneratedUI =
+    viewMode === "designer" ||
+    designerPages.length > 0 ||
+    messages.some((m) => m.role === "assistant" && m.content.includes("```html"));
 
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-900">
@@ -989,7 +1111,8 @@ export default function Home() {
       )}
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* View toggle: Chat | Designer */}
+        {/* View toggle: Chat | Designer — cuma muncul kalau ada UI yang ke-generate */}
+        {hasGeneratedUI && (
         <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
           <button
             onClick={() => setViewMode("chat")}
@@ -1014,6 +1137,7 @@ export default function Home() {
             Designer
           </button>
         </div>
+        )}
 
         {viewMode === "chat" ? (
           <>
@@ -1026,12 +1150,16 @@ export default function Home() {
               onReplyAction={handleReply}
               onQuoteAction={handleQuote}
               onOpenInDesignerAction={handleOpenInDesigner}
+              onRefreshMessagesAction={refreshMessages}
             />
 
             <MessageInput
               input={input}
               isLoading={isLoading}
               sessionId={activeSessionId}
+              pendingFiles={pendingFiles}
+              onAddFiles={handleAddFiles}
+              onRemoveFile={handleRemoveFile}
               onInputChange={setInput}
               onSubmit={handleSubmit}
               onStop={handleStop}

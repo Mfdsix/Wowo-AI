@@ -9,27 +9,68 @@ datasource db {
 }
 
 model Session {
-  id          String         @id @default(cuid())
-  title       String         @default("New Chat")
-  designStyle String?        // NeedMCP style slug yang di-lock (e.g. "modern")
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  messages    Message[]
-  designerPages DesignerPage[]
+  id             String          @id @default(cuid())
+  title          String          @default("New Chat")
+  designStyle    String?         // NeedMCP style slug yang di-lock (e.g. "modern")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  messages       Message[]
+  attachments    Attachment[]
+  designerPages  DesignerPage[]
 }
 
 model Message {
-  id         String   @id @default(cuid())
-  sessionId  String
-  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role       String   // "user" | "assistant"
-  content    String
-  model      String?  // nama model yang dipake (optional)
-  bookmarked Boolean  @default(false)
-  replyToId  String?  // referensi pesan yang di-reply (quote)
-  quoteText  String?  // teks spesifik yang di-quote (highlight)
-  createdAt  DateTime @default(now())
+  id          String       @id @default(cuid())
+  sessionId   String
+  session     Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role        String       // "user" | "assistant"
+  content     String
+  model       String?      // nama model yang dipake (optional)
+  bookmarked  Boolean      @default(false)
+  replyToId   String?      // referensi pesan yang di-reply (quote)
+  quoteText   String?      // teks spesifik yang di-quote (highlight)
+  attachments Attachment[]
+  createdAt   DateTime     @default(now())
 
+  @@index([sessionId])
+}
+
+model Attachment {
+  id          String   @id @default(cuid())
+  sessionId   String
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  messageId   String
+  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  filename    String
+  mimeType    String   // full IANA type (ternormalisasi)
+  size        Int      // bytes
+  data        Bytes?   // raw bytes (semua attachment: thumbnail + regenerate)
+  textContent String?  // extracted text (pdf/docx/text)
+  route       String?  // Document Router: native | vision | ocr (cuma PDF)
+  // Document Intelligence pipeline (RAG) — status index dokumen besar.
+  status      String   @default("pending") // pending | extracting | ocr | indexing | ready | failed
+  progress    Int      @default(0)         // 0..100
+  error       String?  // pesan error kalau status failed
+  chunks      DocChunk[]
+  createdAt   DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([messageId])
+}
+
+model DocChunk {
+  id           String     @id @default(cuid())
+  attachmentId String
+  attachment   Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  sessionId    String
+  chunkIndex   Int
+  pageStart    Int        // halaman asal (1-based) — buat kutip sumber
+  pageEnd      Int
+  text         String
+  embedding    Bytes?     // float32 flat (dimensi dari response provider)
+  createdAt    DateTime   @default(now())
+
+  @@unique([attachmentId, chunkIndex]) // idempoten: resume gak dobel-insert
   @@index([sessionId])
 }
 

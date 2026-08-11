@@ -20,10 +20,52 @@ export async function GET(
       replyToId: true,
       quoteText: true,
       createdAt: true,
+      attachments: {
+        select: {
+          id: true,
+          filename: true,
+          mimeType: true,
+          size: true,
+          route: true,
+          status: true,
+          progress: true,
+          error: true,
+          _count: { select: { chunks: true } },
+        },
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
 
-  return NextResponse.json(messages);
+  // Summary index: jumlah chunk + halaman terakhir yang ke-index (max pageEnd).
+  // Satu query groupBy buat semua attachment di session (hindari N+1).
+  const attIds = messages.flatMap((m) => m.attachments.map((a) => a.id));
+  const pageAgg = attIds.length
+    ? await prisma.docChunk.groupBy({
+        by: ["attachmentId"],
+        _max: { pageEnd: true },
+        where: { attachmentId: { in: attIds } },
+      })
+    : [];
+  const pageByAtt = new Map(pageAgg.map((g) => [g.attachmentId, g._max.pageEnd]));
+
+  const result = messages.map((m) => ({
+    ...m,
+    attachments: m.attachments.map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      size: a.size,
+      route: a.route,
+      status: a.status,
+      progress: a.progress,
+      error: a.error,
+      chunkCount: a._count.chunks,
+      pageCount: pageByAtt.get(a.id) ?? undefined,
+    })),
+  }));
+
+  return NextResponse.json(result);
 }
 
 // POST /api/sessions/[id]/messages — simpan pesan baru

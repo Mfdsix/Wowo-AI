@@ -2,6 +2,18 @@ import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
 
 const NEEDMCP_URL = "https://needmcp.com/mcp";
 
+// Bentuk minimal hasil tool call MCP — responsenya gak di-type oleh SDK
+type ToolResult = {
+  content?: Array<{ text?: string }>;
+  structuredContent?: unknown;
+};
+
+type StyleItem = {
+  slug?: unknown;
+  name?: unknown;
+  styleSlug?: unknown;
+};
+
 export type NeedMCPConnection = {
   client: MCPClient;
   tools: Awaited<ReturnType<MCPClient["tools"]>>;
@@ -80,8 +92,8 @@ export async function fetchDesignSystemBrief(
       name: "get-design-system-tool",
       arguments: { styleSlug },
     });
-    const anyRes = res as any;
-    let parsed: any = anyRes.structuredContent ?? anyRes.content?.[0]?.text;
+    const toolRes = res as unknown as ToolResult;
+    let parsed: unknown = toolRes.structuredContent ?? toolRes.content?.[0]?.text;
     if (typeof parsed === "string") {
       try {
         parsed = JSON.parse(parsed);
@@ -89,7 +101,7 @@ export async function fetchDesignSystemBrief(
         return null;
       }
     }
-    const yaml: unknown = parsed?.designSystem;
+    const yaml: unknown = (parsed as { designSystem?: unknown })?.designSystem;
     if (typeof yaml !== "string" || !yaml.trim()) return null;
 
     // Ambil cuma section token yang berguna, potong di batas section (bukan motong nilai)
@@ -121,11 +133,11 @@ export async function listNeedMCPStyles(): Promise<{ slug: string; name: string 
       name: "get-styles-tool",
       arguments: { page: 1, limit: 50 },
     });
-    const anyRes = res as any;
+    const toolRes = res as unknown as ToolResult;
 
     // Normalize list style dari berbagai shape yang mungkin dikeluarin server.
     // Prefer raw text (sering berisi full list) dari pada structuredContent.
-    const extract = (raw: unknown): any[] => {
+    const extract = (raw: unknown): unknown[] => {
       if (typeof raw === "string") {
         try {
           raw = JSON.parse(raw);
@@ -134,23 +146,24 @@ export async function listNeedMCPStyles(): Promise<{ slug: string; name: string 
         }
       }
       if (Array.isArray(raw)) return raw;
-      if (raw && Array.isArray((raw as any).data)) return (raw as any).data;
-      if (raw && (raw as any).styleSlug) return [raw]; // single style object
+      const data = (raw as { data?: unknown })?.data;
+      if (Array.isArray(data)) return data;
+      if ((raw as { styleSlug?: unknown })?.styleSlug) return [raw]; // single style object
       return [];
     };
 
-    const fromText = extract(anyRes.content?.[0]?.text);
-    const fromStructured = extract(anyRes.structuredContent);
+    const fromText = extract(toolRes.content?.[0]?.text);
+    const fromStructured = extract(toolRes.structuredContent);
     // Pilih yang paling banyak item-nya (biasanya text = full list)
-    let list = fromText.length >= fromStructured.length ? fromText : fromStructured;
+    const list = fromText.length >= fromStructured.length ? fromText : fromStructured;
 
     if (list.length === 0) {
-      console.error("[NeedMCP] unexpected get-styles-tool result:", JSON.stringify(anyRes).slice(0, 400));
+      console.error("[NeedMCP] unexpected get-styles-tool result:", JSON.stringify(toolRes).slice(0, 400));
       return [];
     }
 
-    return list
-      .map((s: any) => ({
+    return (list as StyleItem[])
+      .map((s) => ({
         slug: String(s?.slug ?? s?.styleSlug ?? ""),
         name: String(s?.name ?? s?.slug ?? s?.styleSlug ?? ""),
       }))

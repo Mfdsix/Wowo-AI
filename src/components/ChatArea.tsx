@@ -1,39 +1,28 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
 import TextSelectionToolbar from "./TextSelectionToolbar";
-
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  model?: string | null;
-  bookmarked?: boolean;
-  replyToId?: string | null;
-  quoteText?: string | null;
-  createdAt?: string;
-};
+import FileTypeIcon from "./FileTypeIcon";
+import FilePreviewModal from "./FilePreviewModal";
+import type { Message, AttachmentMeta } from "@/lib/types";
 
 // ─── ReactMarkdown component overrides ──────────────────────
-const MARKDOWN_COMPONENTS = {
+const MARKDOWN_COMPONENTS: Components = {
   // Jangan bungkus pake <pre> — biar CodeBlock full kontrol layout
-  pre({ children }: any) {
+  pre({ children }) {
     return <>{children}</>;
   },
-  code({ className, children, ...props }: any) {
+  code({ className, children }) {
     const match = /language-(\w+)/.exec(className || "");
     const code = String(children).replace(/\n$/, "");
 
     if (!match) {
       return (
-        <code
-          className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-200 text-sm font-mono"
-          {...props}
-        >
+        <code className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-200 text-sm font-mono">
           {children}
         </code>
       );
@@ -52,17 +41,94 @@ type ChatAreaProps = {
   onReplyAction?: (message: Message) => void;
   onQuoteAction?: (text: string, messageId: string) => void;
   onOpenInDesignerAction?: (content: string) => void;
+  onRefreshMessagesAction?: () => void; // refetch messages — dipake poll status index
 };
 
-export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction, onOpenInDesignerAction }: ChatAreaProps) {
+// Status Document Intelligence pipeline — chip kecil di attachment
+const PROCESSING_STATUSES = ["pending", "extracting", "ocr", "indexing"] as const;
+const INDEX_STATUS_LABEL: Record<string, string> = {
+  pending: "antri index",
+  extracting: "extract teks",
+  ocr: "OCR…",
+  indexing: "indexing…",
+  ready: "ter-index",
+  failed: "gagal",
+};
+
+function AttachmentIndexChip({ att }: { att: AttachmentMeta }) {
+  if (!att.status) return null;
+
+  // Siap → hijau + ringkasan (jumlah halaman / chunk hasil index)
+  if (att.status === "ready") {
+    const summary = att.pageCount
+      ? `Siap · ${att.pageCount} hal`
+      : att.chunkCount
+        ? `Siap · ${att.chunkCount} chunk`
+        : "Siap";
+    return (
+      <span
+        className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-emerald-500/20 text-emerald-300"
+        title={att.chunkCount ? `${att.chunkCount} chunk ter-index` : "ter-index"}
+      >
+        <Check size={9} className="text-emerald-300" />
+        {summary}
+      </span>
+    );
+  }
+
+  // Gagal → merah + error di tooltip
+  if (att.status === "failed") {
+    return (
+      <span
+        className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-red-500/20 text-red-300"
+        title={att.error ?? "gagal di-index"}
+      >
+        <X size={9} />
+        Gagal
+      </span>
+    );
+  }
+
+  // Processing (pending/extracting/ocr/indexing) → biru + spinner + stage + %
+  const label = INDEX_STATUS_LABEL[att.status] ?? att.status;
+  const progress =
+    typeof att.progress === "number" && att.progress > 0 ? ` ${att.progress}%` : "";
+  return (
+    <span
+      className="inline-flex shrink-0 animate-pulse items-center gap-1 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide bg-sky-500/20 text-sky-300"
+      title={`Index dokumen: ${label}`}
+    >
+      <Loader2 size={9} className="animate-spin" />
+      {label}
+      {progress}
+    </span>
+  );
+}
+
+export default function ChatArea({ messages, isLoading, sessionId, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onQuoteAction, onOpenInDesignerAction, onRefreshMessagesAction }: ChatAreaProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeBookmarkId, setActiveBookmarkId] = useState<string | null>(null);
+  const [previewAtt, setPreviewAtt] = useState<AttachmentMeta | null>(null);
 
   // Auto-scroll ke bawah tiap ada pesan baru
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: isLoading ? "instant" : "smooth" });
   }, [messages, isLoading]);
+
+  // Poll status index attachment yang lagi diproses — refetch messages
+  // tiap 3 detik selama ada dokumen ke-index (kecuali lagi streaming).
+  const hasProcessingAttachment = messages.some(
+    (m) =>
+      m.attachments?.some((a) =>
+        a.status && (PROCESSING_STATUSES as readonly string[]).includes(a.status)
+      ) ?? false
+  );
+  useEffect(() => {
+    if (!hasProcessingAttachment || isLoading || !onRefreshMessagesAction) return;
+    const t = setInterval(onRefreshMessagesAction, 3000);
+    return () => clearInterval(t);
+  }, [hasProcessingAttachment, isLoading, onRefreshMessagesAction]);
 
   // Track bookmark aktif — star yang lagi keliatan di tengah viewport
   useEffect(() => {
@@ -170,6 +236,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
               onToggleBookmarkAction={onToggleBookmarkAction}
               onReplyAction={onReplyAction}
               onOpenInDesignerAction={onOpenInDesignerAction}
+              onPreviewAttachment={setPreviewAtt}
             />
           );
         })}
@@ -207,6 +274,15 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
 
       {/* Text selection toolbar — Copy | Quote */}
       <TextSelectionToolbar onQuoteAction={onQuoteAction} />
+
+      {/* File preview modal — klik attachment chip */}
+      {previewAtt && sessionId && (
+        <FilePreviewModal
+          attachment={previewAtt}
+          sessionId={sessionId}
+          onClose={() => setPreviewAtt(null)}
+        />
+      )}
     </div>
   );
 }
@@ -222,9 +298,10 @@ type MessageBubbleProps = {
   onToggleBookmarkAction?: (messageId: string) => void;
   onReplyAction?: (message: Message) => void;
   onOpenInDesignerAction?: (content: string) => void;
+  onPreviewAttachment?: (att: AttachmentMeta) => void;
 };
 
-function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onOpenInDesignerAction }: MessageBubbleProps) {
+function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAction, onToggleBookmarkAction, onReplyAction, onOpenInDesignerAction, onPreviewAttachment }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -248,6 +325,60 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
     >
       {/* Column wrapper — biar action buttons di BAWAH bubble */}
       <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
+      {/* Attachments — icon tipe file, di ATAS bubble */}
+      {isUser && message.attachments && message.attachments.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-2 max-w-[85%] px-4 pt-2">
+          {message.attachments.map((att) => {
+            const isIndexing =
+              !!att.status &&
+              (PROCESSING_STATUSES as readonly string[]).includes(att.status);
+            return (
+              <button
+                key={att.id}
+                type="button"
+                onClick={() => onPreviewAttachment?.(att)}
+                className="flex flex-col rounded-md bg-white/10 px-2 py-1 text-xs text-white/90 min-w-0
+                           hover:bg-white/20 hover:text-white transition-colors duration-150 cursor-pointer"
+                title={`${att.filename} (${att.mimeType}) — klik buat preview`}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <FileTypeIcon mimeType={att.mimeType} size={13} className="shrink-0" />
+                  <span className="truncate max-w-[160px]">{att.filename}</span>
+                  {/* Badge route Document Router — cuma PDF punya route */}
+                  {att.route && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${
+                        att.route === "native"
+                          ? "bg-emerald-500/20 text-emerald-300"
+                          : "bg-amber-500/20 text-amber-300"
+                      }`}
+                    >
+                      {att.route === "native"
+                        ? "native"
+                        : att.route === "ocr"
+                        ? "ocr"
+                        : "scan→vision"}
+                    </span>
+                  )}
+                  {/* Status Document Intelligence pipeline — index dokumen */}
+                  {att.status && <AttachmentIndexChip att={att} />}
+                </span>
+                {/* Progress bar — animasi selagi dokumen ke-index di background */}
+                {isIndexing && (
+                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-full bg-white/10">
+                    <span
+                      className="block h-full rounded-full bg-sky-400 transition-all duration-500 ease-out"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, att.progress ?? 0))}%`,
+                      }}
+                    />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <div
         className={`flex items-start gap-3 px-4 py-3 max-w-[85%] ${
           isUser ? "flex-row-reverse" : ""
@@ -315,6 +446,22 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
               )}
             </div>
           </div>
+
+          {/* Sumber RAG — dokumen + halaman yang dipake AI buat jawab */}
+          {!isUser && message.sources && message.sources.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5 pl-1">
+              {message.sources.map((s, i) => (
+                <span
+                  key={`${s.filename}-${i}`}
+                  className="inline-flex items-center gap-1 rounded bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  title="Sumber retrieval — halaman dokumen yang dipake buat jawab"
+                >
+                  <FileText size={10} className="shrink-0" />
+                  {s.filename} · hal. {s.pages}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

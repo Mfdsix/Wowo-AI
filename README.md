@@ -57,17 +57,78 @@ Kosongin atau hapus variabel ini kalau mau matiin integrasinya. Contoh lengkap a
 ## Getting Started
 
 ```bash
-# Install dependencies
-npm install
-
-# Setup database
-npx prisma db push
+# Setup environment: bikin .env (SQLite + LLM), install deps, migrate database
+chmod +x setup.sh && ./setup.sh
 
 # Run development server
 npm run dev
 ```
 
 Buka [http://localhost:3000](http://localhost:3000) di browser.
+
+> `.env` hasil `setup.sh` itu minimal (cuma database + LLM). Untuk fitur PDF scan,
+> tambahkan `OCR_BASE_URL` & `OCR_LANGUAGE` secara manual — lihat **OCR Service** di bawah.
+
+## OCR Service (PDF Scan)
+
+wowo.ai punya **Document Router** untuk PDF yang di-upload ke chat:
+
+- **native** — PDF punya text layer → teks di-extract langsung (murah & cepat)
+- **vision** — PDF kompleks/visual → halaman di-render ke gambar, dibaca vision model
+- **ocr** — PDF scan (gambar-heavy, multilingual) → di-route ke **OCR service** (PaddleOCR)
+
+> ⚠️ **Service OCR ini repo terpisah & private** — bukan bagian dari repo ini.
+> Kamu harus setup sendiri service OCR-nya dulu sebelum fitur baca PDF scan jalan penuh.
+> Kalau service OCR belum ada / mati, PDF scan otomatis **fallback ke vision model**
+> (app tetap jalan, hasil bacanya lewat VLM).
+
+### 1. Setup service OCR (repo terpisah)
+
+Clone repo OCR (PaddleOCR + FastAPI) dari tempat lain, lalu jalanin:
+
+```bash
+git clone <url-repo-ocr-private>
+cd <folder-repo-ocr>
+
+# Docker — direkomendasikan (image ~2GB, build pertama agak lama)
+docker compose up -d --build
+
+# atau tanpa Docker (venv Python)
+bash setup.sh
+bash run.sh
+```
+
+Cek service-nya hidup:
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"ok": true, "engine": "paddleocr"}
+```
+
+### 2. Konfigurasi wowo.ai
+
+`./setup.sh` bikin `.env` minimal — tambahkan 2 variabel ini secara manual:
+
+```
+# .env — tambahkan setelah jalankan ./setup.sh
+OCR_BASE_URL="http://127.0.0.1:8000"   # URL service OCR
+OCR_LANGUAGE="ch"                       # bahasa PaddleOCR (ch/en/japan/...)
+```
+
+- `OCR_BASE_URL` kosong → PDF scan yang di-route `ocr` langsung fallback ke vision.
+- `OCR_LANGUAGE` default `ch`, bisa diubah per bahasa (`en`, `japan`, dst).
+
+### 3. Test OCR
+
+Render satu halaman PDF scan ke PNG, lalu kirim ke service:
+
+```bash
+curl -F "files=@page.png" http://127.0.0.1:8000/ocr
+# {"pages": [{"page": 1, "text": "...", "confidence": 0.97, "blocks": [...]}]}
+```
+
+> Catatan: OCR service bind ke `127.0.0.1` — cocok kalau wowo.ai jalan di **host** yang
+> sama. Kalau wowo.ai ikut di-dockerize, sesuaikan network & host bind-nya.
 
 ## Screenshots
 
