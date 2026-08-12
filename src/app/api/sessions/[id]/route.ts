@@ -55,6 +55,7 @@ export async function PATCH(
       title: true,
       designStyle: true,
       mode: true,
+      podcastConfig: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },

@@ -71,7 +71,7 @@ export async function POST(req: NextRequest) {
       : {}),
   };
 
-  const systemPrompt = buildPodcastSystemPrompt(speaker, names);
+  const systemPrompt = buildPodcastSystemPrompt(speaker, names, topic);
 
   const transcript = buildHistoryForModel(history, names);
   const userPrompt = [
@@ -100,8 +100,8 @@ export async function POST(req: NextRequest) {
         try {
           const result = streamText({
             model: openai.chat(modelName),
+            system: systemPrompt,
             messages: [{ role: "user", content: userPrompt }],
-            instructions: systemPrompt,
             maxRetries: 0,
             abortSignal: req.signal,
           });

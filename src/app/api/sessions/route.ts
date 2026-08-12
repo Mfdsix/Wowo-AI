@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 // GET /api/sessions — list semua session
 export async function GET() {
   const sessions = await prisma.session.findMany({
-    orderBy: { updatedAt: "desc" },
+    orderBy: [{ updatedAt: "desc" }],
     select: {
       id: true,
       title: true,

@@ -10,7 +10,7 @@ export async function GET(
 
   const messages = await prisma.message.findMany({
     where: { sessionId: id },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }],
     select: {
       id: true,
       role: true,
@@ -33,7 +33,7 @@ export async function GET(
           error: true,
           _count: { select: { chunks: true } },
         },
-        orderBy: { createdAt: "asc" },
+        orderBy: [{ createdAt: "asc" }],
       },
     },
   });
@@ -105,4 +105,48 @@ export async function POST(
   });
 
   return NextResponse.json(message, { status: 201 });
+}
+
+// DELETE /api/sessions/[id]/messages?after=<messageId> — hapus semua pesan
+// yang dibuat SETELAH message tertentu. Dipakai "lanjut dari sini" di
+// podcast: truncate kelanjutan biar regenerate dari titik itu.
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const after = req.nextUrl.searchParams.get("after");
+
+  if (!after) {
+    return NextResponse.json(
+      { error: "param 'after' (messageId) wajib diisi" },
+      { status: 400 }
+    );
+  }
+
+  // Ambil semua id pesan urut kencan bikin. Cari posisi anchor, hapus yang
+  // SETELAHnya. (pakai posisi list, bukan banding timestamp — biar aman dari
+  // pesan yang serialize di milidetik yang sama).
+  const ordered = await prisma.message.findMany({
+    where: { sessionId: id },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true },
+  });
+  const anchorIdx = ordered.findIndex((m) => m.id === after);
+  if (anchorIdx === -1) {
+    return NextResponse.json(
+      { error: "message acuan tidak ditemukan di session ini" },
+      { status: 404 }
+    );
+  }
+
+  // Hapus pesan SETELAH anchor (ke-truncate, bukan ke-delete).
+  const toDelete = ordered
+    .slice(anchorIdx + 1)
+    .map((m) => m.id);
+  if (toDelete.length > 0) {
+    await prisma.message.deleteMany({ where: { id: { in: toDelete } } });
+  }
+
+  return NextResponse.json({ ok: true, deleted: toDelete.length });
 }

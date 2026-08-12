@@ -29,6 +29,25 @@ type Session = {
   _count: { messages: number };
 };
 
+// Pecah teks jadi kalimat untuk TTS chunked.
+const SENTENCE_RE = /[.!?…]+[\s\n]+|[.!?…]+$/;
+
+// Chunk audio di channel: kind=chunk ada audio, kind=end sentinel akhir turn,
+// kind=failed TTS gagal (skip tanpa hentikan turn).
+type ChannelItem =
+  | { kind: "chunk"; url: string }
+  | { kind: "end" }
+  | { kind: "failed" };
+
+type SpawnedTurn = {
+  turnIndex: number;
+  speaker: Speaker;
+  tempId: string;
+  isTopBubble: boolean;
+  abort: AbortController;
+  finalize: () => Promise<Message | null>;
+};
+
 // Client-side caps — mirror caps di src/lib/attachments.ts
 const MAX_CLIENT_FILES = 10;
 const MAX_CLIENT_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -115,19 +134,20 @@ export default function Home() {
   const designerSubmitRef = useRef<((prompt: string) => Promise<void>) | null>(null);
 
   // ─── Podcast mode state ────────────────────────────────────────
-  const [podcastStatus, setPodcastStatus] = useState<"idle" | "running" | "paused" | "stopped">("idle");
+  const [podcastStatus, setPodcastStatus] = useState<"idle" | "running" | "stopped">("idle");
   const [podcastTurnCount, setPodcastTurnCount] = useState(0);
   const [podcastConfig, setPodcastConfig] = useState<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
   const [podcastActiveSpeaker, setPodcastActiveSpeaker] = useState<Speaker | null>(null);
   const [podcastStreamingId, setPodcastStreamingId] = useState<string | null>(null);
   const [podcastPlayingId, setPodcastPlayingId] = useState<string | null>(null);
+  const [podcastLoadingId, setPodcastLoadingId] = useState<string | null>(null);
   const [podcastNeedsGesture, setPodcastNeedsGesture] = useState(false);
   const [podcastNoteInput, setPodcastNoteInput] = useState("");
   const [podcastReplaying, setPodcastReplaying] = useState(false);
   // Refs: source of truth buat loop async biar gak kena stale-closure.
   // Status/turnCount/config dibaca dari sini, state cuma buat render.
   const podcastStateRef = useRef({
-    status: "idle" as "idle" | "running" | "paused" | "stopped",
+    status: "idle" as "idle" | "running" | "stopped",
     turnCount: 0,
     config: DEFAULT_PODCAST_CONFIG,
   });
@@ -143,6 +163,7 @@ export default function Home() {
   const podcastConfigRef = useRef<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
   const podcastMessagesRef = useRef<Message[]>([]);
   const podcastSessionIdRef = useRef<string | null>(null);
+  const podcastTopicRef = useRef<string>("");
   useEffect(() => { podcastMessagesRef.current = messages; }, [messages]);
   useEffect(() => { podcastSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
@@ -167,6 +188,8 @@ export default function Home() {
       if (!res.ok) throw new Error("Failed to fetch messages");
       const data: Message[] = await res.json();
       setMessages(data);
+      podcastMessagesRef.current = data;
+      podcastTopicRef.current = data.find((m) => m.role === "user")?.content ?? "";
     } catch (err) {
       console.error("fetchMessages error:", err);
     }
@@ -278,6 +301,10 @@ export default function Home() {
 
   // ─── New session ────────────────────────────────────────────
   const handleNewSession = useCallback(async () => {
+    // Kalau session yang aktif sekarang udah kosong (0 messages), tinggal pake session ini aja.
+    if (activeSessionId && messages.length === 0) {
+      return;
+    }
     try {
       const res = await fetch("/api/sessions", {
         method: "POST",
@@ -288,11 +315,67 @@ export default function Home() {
       const session: Session = await res.json();
       setSessions((prev) => [session, ...prev]);
       setActiveSessionId(session.id);
+      podcastSessionIdRef.current = session.id;
       setMessages([]);
+      podcastMessagesRef.current = [];
+      podcastTopicRef.current = "";
     } catch (err) {
       console.error("handleNewSession error:", err);
     }
+  }, [activeSessionId, messages.length]);
+
+  // ─── Podcast pipeline refs & helpers ─────────────────────────────────
+  const turnsCommittedRef = useRef(0);       // turn yang udah commit (persisted atau temp bubble)
+  const spawnCursorRef = useRef(0);          // index turn yang akan di-spawn berikutnya
+  const parallelTextsRef = useRef<Record<number, { speaker: Speaker; content: string }>>({});
+  const channelRef = useRef<{
+    queue: ((turn: number, item: ChannelItem) => void)[];
+    buf: { turn: number; item: ChannelItem }[];
+  }>({ queue: [], buf: [] });
+  const spawnedTurnsRef = useRef<Record<number, SpawnedTurn>>({});
+  const nextTurnEnqueuedRef = useRef(false); // guard: spawn N+1 jangan dobel
+  const ensureNextTurnSpawnedRef = useRef<((afterTurn: number) => void) | null>(null);
+  const channelPush = useCallback((turn: number, item: ChannelItem) => {
+    const c = channelRef.current;
+    if (c.queue.length) { c.queue.shift()!(turn, item); return; }
+    c.buf.push({ turn, item });
   }, []);
+  const channelTake = useCallback((expectedTurn: number) =>
+    new Promise<{ turn: number; item: ChannelItem }>((resolve) => {
+      const c = channelRef.current;
+      const i = c.buf.findIndex((b) => b.turn === expectedTurn);
+      if (i >= 0) { const e = c.buf.splice(i, 1)[0]; resolve({ turn: e.turn, item: e.item }); return; }
+      c.queue.push((turn, item) => resolve({ turn, item }));
+    }), []);
+  const channelClear = useCallback(() => {
+    const c = channelRef.current;
+    for (const r of c.queue.splice(0)) r(-1, { kind: "failed" }); // bangunin waiter → batal
+    for (const b of c.buf.splice(0)) if (b.item.kind === "chunk") URL.revokeObjectURL(b.item.url);
+  }, []);
+  const resetPodcastPipeline = useCallback(() => {
+    channelClear();
+    parallelTextsRef.current = {};
+    spawnedTurnsRef.current = {};
+    nextTurnEnqueuedRef.current = false;
+    spawnCursorRef.current = 0;
+    turnsCommittedRef.current = 0;
+  }, [channelClear]);
+
+  // Sinkronkan pipeline refs sama transkrip yang udah tersimpan — belum
+  // dipakai sebagai hook eksternal, tapi disimpan buat dipakai pipeline.
+  const syncPipelineToTranscript = useCallback(() => {
+    channelClear();
+    parallelTextsRef.current = {};
+    spawnedTurnsRef.current = {};
+    nextTurnEnqueuedRef.current = false;
+    const count = podcastMessagesRef.current.filter(
+      (m) =>
+        m.role === "assistant" && m.speaker &&
+        !m.id.startsWith("temp-") && !m.id.startsWith("assist-") && !m.id.startsWith("error-")
+    ).length;
+    spawnCursorRef.current = count;
+    turnsCommittedRef.current = count;
+  }, [channelClear]);
 
   // ─── Select session ─────────────────────────────────────────
   const handleSelectSession = useCallback(
@@ -304,9 +387,14 @@ export default function Home() {
       setPodcastStatus("stopped");
       setPodcastStreamingId(null);
       setPodcastPlayingId(null);
+      setPodcastLoadingId(null);
+      resetPodcastPipeline();
 
       setActiveSessionId(id);
+      podcastSessionIdRef.current = id;
       setMessages([]);
+      podcastMessagesRef.current = [];
+      podcastTopicRef.current = "";
       setIsLoading(false);
       abortRef.current?.abort();
 
@@ -335,7 +423,7 @@ export default function Home() {
       }
       await fetchMessages(id);
     },
-    [activeSessionId, fetchMessages, sessions]
+    [activeSessionId, fetchMessages, sessions, resetPodcastPipeline]
   );
 
   // ─── Delete session ─────────────────────────────────────────
@@ -662,72 +750,153 @@ export default function Home() {
       });
   }, []);
 
-  // Generate SATU giliran + play audionya. Dipanggil berulang via rekursi.
-  const podcastNextTurn = useCallback(async () => {
-    const st = podcastStateRef.current;
+  // ─── Chunked TTS helpers ──────────────────────────────────────────
+  // SENTENCE_RE dipindah ke level modul (dipakai juga di spawnTurn).
+
+  /** Fire TTS request, return Promise<string|null> (object URL or null on error). */
+  const fetchTtsChunk = useCallback(
+    async (text: string, speaker: Speaker, signal?: AbortSignal): Promise<string | null> => {
+      const clean = sanitizeForTts(text);
+      if (!clean) return null;
+      const { voice, pitchShift } = voiceFor(speaker);
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: clean, voice, pitchShift }),
+          signal,
+        });
+        if (!res.ok) {
+          console.error("[Podcast] TTS chunk failed:", res.status);
+          return null;
+        }
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      } catch (err) {
+        if (signal?.aborted) return null;
+        console.error("[Podcast] TTS chunk error:", err);
+        return null;
+      }
+    },
+    []
+  );
+
+  // Fetch TTS SELURUH konten satu pesan jadi satu blob audio. Dipakai buat
+  // "Lanjut dari sini" & replay — pesan BERIKUTNYA di-prefetch selama pesan
+  // sekarang diputar, jadi transisi antar-bubble seamless.
+  // Return Promise yang resolve URL audio (atau null) — caller yang await
+  // tepat sebelum bubble itu mau diputar, jadi fetch jalan paralel dgn playback.
+  const prefetchMessageAudio = useCallback(
+    async (msg: Message): Promise<string | null> => {
+      const speaker = (msg.speaker as Speaker) ?? "host";
+      const clean = sanitizeForTts(msg.content);
+      if (!clean) return null;
+      try {
+        const { voice, pitchShift } = voiceFor(speaker);
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: clean, voice, pitchShift }),
+        });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      } catch (err) {
+        console.error("[Podcast] prefetchTts error:", err);
+        return null;
+      }
+    },
+    []
+  );
+
+  // ─── Orchestrator podcast: lookahead pipeline ─────────────────────────
+  // spawnTurn jalanin generate+TTS di background; hasil teks masuk
+  // parallelTextsRef, chunk audio masuk channel. Player loop konsumsi
+  // channel, konfirmasi teks ke DB, lalu spawn turn berikutnya. Turn yang
+  // ke-spawn dipertahanin pas pause → resume instan.
+  const spawnTurn = useCallback((turnIndex: number, stick: boolean) => {
     const sessionId = podcastSessionIdRef.current;
-    if (st.status !== "running" || !sessionId) return;
-    if (st.turnCount >= podcastConfigRef.current.maxTurns) {
-      podcastStateRef.current = { ...st, status: "stopped" };
-      setPodcastStatus("stopped");
-      return;
-    }
+    if (!sessionId) return;
+    const speaker = speakerAt(turnIndex);
+    const tempId = `assist-${crypto.randomUUID()}`;
 
-    const speaker = speakerAt(st.turnCount);
-    podcastStateRef.current = { ...st, turnCount: st.turnCount + 1 };
-    setPodcastTurnCount(st.turnCount + 1);
-    setPodcastActiveSpeaker(speaker);
-
-    // Note produser yang ke-pending — dikirim sekali, dikosongin.
-    const note = podcastPendingNotesRef.current.join("\n");
-    podcastPendingNotesRef.current = [];
-
-    // History = cuma turn on-air (assistant + speaker). Topik & note
-    // dikirim terpisah biar gak dobel.
+    // Bangun history dari turn yang udah commit + teks paralel yang udah final.
     const msgs = podcastMessagesRef.current.filter(
       (m) =>
-        m.role === "assistant" &&
-        m.speaker &&
-        !m.id.startsWith("temp-") &&
-        !m.id.startsWith("assist-") &&
-        !m.id.startsWith("error-")
+        m.role === "assistant" && m.speaker &&
+        !m.id.startsWith("temp-") && !m.id.startsWith("assist-") && !m.id.startsWith("error-")
     );
     const history = msgs.map((m) => ({
       role: "assistant" as const,
       speaker: m.speaker ?? null,
       content: m.content,
     }));
+    const ptKeys = Object.keys(parallelTextsRef.current)
+      .map(Number)
+      .filter((t) => t < turnIndex)
+      .sort((a, b) => a - b);
+    for (const t of ptKeys) {
+      // Semua turn sebelumnya yang sudah punya teks (parallelTexts)
+      // HARUS masuk history supaya model punya konteks penuh.
+      // `turnsCommittedRef` hanya untuk UI gating, bukan untuk context.
+      history.push({ role: "assistant", speaker: parallelTextsRef.current[t].speaker, content: parallelTextsRef.current[t].content });
+    }
     const firstUser = podcastMessagesRef.current.find(
       (m) => m.role === "user" && !m.id.startsWith("temp-")
     );
-    const topic = firstUser ? firstUser.content : "";
+    const topic = podcastTopicRef.current || (firstUser ? firstUser.content : "");
+    const note = podcastPendingNotesRef.current.join("\n");
+    podcastPendingNotesRef.current = [];
 
-    const tempId = `assist-${crypto.randomUUID()}`;
-    setPodcastStreamingId(tempId);
-    setMessages((prev) => [
-      ...prev,
-      { id: tempId, role: "assistant", speaker, content: "", attachments: [] },
-    ]);
+    // UI: bubble paling bawah nempel ke streaming (bubble streaming DOBEL
+    // diperedam lewat gating di bawah).
+    let streamBubbleId: string | null = null;
+    if (stick || turnIndex === turnsCommittedRef.current) {
+      if (turnIndex >= turnsCommittedRef.current) {
+        turnsCommittedRef.current = turnIndex + 1;
+        setPodcastTurnCount(turnIndex + 1);
+        setPodcastActiveSpeaker(speaker);
+      }
+      streamBubbleId = tempId;
+      setPodcastStreamingId(tempId);
+      setMessages((prev) => [
+        ...prev,
+        { id: tempId, role: "assistant", speaker, content: "", attachments: [] },
+      ]);
+    }
 
     const abort = new AbortController();
-    podcastTurnAbortRef.current = abort;
+    podcastTurnAbortRef.current = abort; // abort terbaru — stop/cleanup
 
     let fullText = "";
     let modelName: string | null = null;
-    try {
-      const res = await fetch("/api/podcast/turn", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: abort.signal,
-        body: JSON.stringify({
-          sessionId,
-          speaker,
-          topic,
-          history,
-          note: note || undefined,
-          names: podcastConfigRef.current.names,
-        }),
-      });
+
+    // Ordered push: request TTS paralel, tapi penayangan ke channel dijaga
+    // urutan kalimat via chain. Chunk gagal TTS di-skip (kind=failed) supaya
+    // kalimat berikutnya tetap diputar — BUKAN menghentikan turn.
+    let pushChain: Promise<void> = Promise.resolve();
+    const pushOrdered = (p: Promise<string | null>) => {
+      const itemP = p.then((url): ChannelItem => (url ? { kind: "chunk", url } : { kind: "failed" }));
+      const itemPromise = itemP.catch((): ChannelItem => ({ kind: "failed" }));
+      pushChain = pushChain.then(() => itemPromise).then((item) => { channelPush(turnIndex, item); });
+    };
+
+    (async () => {
+      let sentenceBuffer = "";
+      try {
+        const res = await fetch("/api/podcast/turn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abort.signal,
+          body: JSON.stringify({
+            sessionId,
+            speaker,
+            topic,
+            history,
+            note: note || undefined,
+            names: podcastConfigRef.current.names,
+          }),
+        });
       modelName = res.headers.get("x-llm-model");
       if (!res.body) throw new Error("No response body");
 
@@ -736,83 +905,179 @@ export default function Home() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        fullText += decoder.decode(value, { stream: true });
-        setMessages((prev) =>
-          prev.map((m) => (m.id === tempId ? { ...m, content: fullText } : m))
-        );
-      }
-      decoder.decode();
-    } catch (err) {
-      if (abort.signal.aborted) {
-        // Stop = selesai. Pause = rollback turn yang ke-interupsi biar
-        // nanti dilanjutin tanpa ke-skip gilirannya.
-        if (podcastStateRef.current.status === "paused") {
-          podcastStateRef.current = {
-            ...podcastStateRef.current,
-            turnCount: Math.max(0, podcastStateRef.current.turnCount - 1),
-          };
-        }
-        // Bersihin bubble temp yang belum ke-persist biar gak nyangkut kosong.
-        setMessages((prev) => prev.filter((m) => m.id !== tempId));
-        setPodcastStreamingId(null);
-        return;
-      }
-      console.error("podcast turn error:", err);
-      fullText += `\n\n_❌ ${err instanceof Error ? err.message : String(err)}_`;
-    } finally {
-      podcastTurnAbortRef.current = null;
-    }
+        const chunk = decoder.decode(value, { stream: true });
+        fullText += chunk;
+        sentenceBuffer += chunk;
 
+          let match: RegExpMatchArray | null;
+          while ((match = sentenceBuffer.match(SENTENCE_RE)) !== null) {
+            const idx = match.index! + match[0].length;
+            const sentence = sentenceBuffer.slice(0, idx).trim();
+            sentenceBuffer = sentenceBuffer.slice(idx);
+            if (!sentence) continue;
+            pushOrdered(fetchTtsChunk(sentence, speaker, abort.signal));
+          }
+
+          if (streamBubbleId) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamBubbleId ? { ...m, content: fullText } : m))
+            );
+          }
+        }
+      decoder.decode();
+
+        const remaining = sentenceBuffer.trim();
+        if (remaining) {
+          pushOrdered(fetchTtsChunk(remaining, speaker, abort.signal));
+        }
+
+        // Teks final udah ada di parallelTextsRef.
+        parallelTextsRef.current[turnIndex] = { speaker, content: fullText.trim() };
+
+        // End marker di-push SETELAH semua chunk chain selesai → nggak mendahului.
+        void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+      } catch (err) {
+        if (abort.signal.aborted) {
+          if (streamBubbleId) {
+            setMessages((prev) => prev.filter((m) => m.id !== streamBubbleId));
+            setPodcastStreamingId(null);
+          }
+          void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+          return;
+        }
+        console.error("podcast turn error:", err);
+        fullText += `\n\n_❌ ${err instanceof Error ? err.message : String(err)}_`;
+        parallelTextsRef.current[turnIndex] = { speaker, content: fullText };
+        if (streamBubbleId) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === streamBubbleId ? { ...m, content: fullText } : m))
+          );
+        }
+        void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+      }
+    })();
+
+    // Daftarkan ke registry — player loop cukup ngeliat ini, tanpa spawn ulang.
+    spawnedTurnsRef.current[turnIndex] = {
+      turnIndex, speaker, tempId, isTopBubble: !!streamBubbleId, abort,
+      finalize: () => finalize(),
+    };
+
+    const finalize = async (): Promise<Message | null> => {
+      if (!parallelTextsRef.current[turnIndex]) return null; // belum selesai / abort
+      const content = parallelTextsRef.current[turnIndex].content;
+      const saved = await saveMessage(sessionId, "assistant", content, modelName ?? undefined, null, null, speaker);
+      if (saved) {
+        setMessages((prev) => {
+          const exists = prev.some((m) => m.id === streamBubbleId);
+          if (exists && streamBubbleId) {
+            return prev.map((m) => (m.id === streamBubbleId ? saved : m));
+          }
+          if (prev.some((m) => m.id === saved.id)) return prev;
+          return [...prev, saved];
+        });
+      }
+      return saved;
+    };
+
+    // Kembalikan entry registry yang sudah didaftarkan di atas.
+    return spawnedTurnsRef.current[turnIndex];
+  }, [fetchTtsChunk, channelPush, saveMessage]);
+
+  const podcastNextTurn = useCallback(async () => {
+    const sessionId = podcastSessionIdRef.current;
+    if (!sessionId) return;
     if (podcastStateRef.current.status !== "running") return;
 
-    // Error di-stream (pola /api/chat: \n\n_❌ ..._) → berhenti, jangan di-persist.
-    if (fullText.includes("_❌")) {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...m, content: fullText } : m))
-      );
-      setPodcastStreamingId(null);
-      podcastStateRef.current = { ...st, status: "stopped" };
-      setPodcastStatus("stopped");
-      return;
-    }
+    let turn = spawnCursorRef.current;
 
-    const saved = await saveMessage(sessionId, "assistant", fullText.trim(), modelName ?? undefined, null, null, speaker);
-    if (!saved) {
-      podcastStateRef.current = { ...st, status: "stopped" };
-      setPodcastStatus("stopped");
-      return;
-    }
-    setMessages((prev) => prev.map((m) => (m.id === tempId ? saved : m)));
-    setPodcastStreamingId(null);
-    setPodcastPlayingId(saved.id);
-
-    // TTS + play
-    const clean = sanitizeForTts(fullText.trim());
-    if (clean) {
-      const { voice, pitchShift } = voiceFor(speaker);
-      try {
-        const ttsRes = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: clean, voice, pitchShift }),
-        });
-        if (ttsRes.ok) {
-          const blob = await ttsRes.blob();
-          const url = URL.createObjectURL(blob);
-          await playPodcastAudio(url);
-        } else {
-          console.error("[Podcast] TTS failed:", ttsRes.status);
-        }
-      } catch (err) {
-        console.error("[Podcast] TTS error:", err);
+    while (true) {
+      const s = podcastStateRef.current.status;
+      if (s !== "running") return;
+      if (turn >= podcastConfigRef.current.maxTurns) {
+        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+        setPodcastStatus("stopped");
+        setPodcastActiveSpeaker(null);
+        resetPodcastPipeline();
+        return;
       }
-    }
-    setPodcastPlayingId(null);
 
-    if (podcastStateRef.current.status === "running") {
-      await podcastNextTurnRef.current?.();
+      // Spawn turn ini kalau belum — stick=true → bubble streaming-nempel.
+      let spawned: SpawnedTurn | undefined = spawnedTurnsRef.current[turn];
+      if (!spawned) {
+        spawned = spawnTurn(turn, true) || undefined;
+        if (!spawned) return;
+      }
+
+      if (spawned.isTopBubble) setPodcastStreamingId(null);
+
+      // Play tiap chunk audio turn ini begitu siap.
+      let hasTriggeredNextSpawn = false;
+      while (true) {
+        const chunk = await channelTake(turn);
+        if (chunk.turn !== turn) return; // batal / cleanup
+        if (chunk.item.kind === "end") break; // audio turn ini habis
+
+        if (chunk.item.kind === "failed") continue; // skip kalimat gagal
+
+        const s2 = podcastStateRef.current.status;
+        if (s2 !== "running") { URL.revokeObjectURL(chunk.item.url); continue; }
+
+        setPodcastPlayingId(spawned.tempId);
+
+        // SAAT TURN N MULAI MEMUTAR AUDIO: Trigger generate Turn N+1 di background!
+        // Ini menjaga lookahead strictly 1 turn ke depan (Host baca -> Tamu A generate).
+        if (!hasTriggeredNextSpawn) {
+          hasTriggeredNextSpawn = true;
+          const nextTurn = turn + 1;
+          if (
+            nextTurn < podcastConfigRef.current.maxTurns &&
+            !spawnedTurnsRef.current[nextTurn]
+          ) {
+            spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
+            spawnTurn(nextTurn, false);
+          }
+        }
+
+        await playPodcastAudio(chunk.item.url);
+      }
+      setPodcastPlayingId(null);
+
+      // Jaga-jaga kalau turn ini tidak punya chunk audio sama sekali
+      if (!hasTriggeredNextSpawn) {
+        const nextTurn = turn + 1;
+        if (
+          nextTurn < podcastConfigRef.current.maxTurns &&
+          !spawnedTurnsRef.current[nextTurn]
+        ) {
+          spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
+          spawnTurn(nextTurn, false);
+        }
+      }
+
+      // Teks final — confirm + persist. Kalau error → stop.
+      const finalText = parallelTextsRef.current[turn]?.content ?? "";
+      if (finalText.includes("_❌")) {
+        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+        setPodcastStatus("stopped");
+        setPodcastActiveSpeaker(null);
+        resetPodcastPipeline();
+        return;
+      }
+      const saved = await spawned.finalize();
+      if (!saved) {
+        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+        setPodcastStatus("stopped");
+        setPodcastActiveSpeaker(null);
+        resetPodcastPipeline();
+        return;
+      }
+
+      turn += 1;
+
+      if (podcastStateRef.current.status !== "running") return;
     }
-  }, [saveMessage, playPodcastAudio]);
+  }, [saveMessage, playPodcastAudio, resetPodcastPipeline, channelPush, channelTake, spawnTurn]);
   useEffect(() => {
     podcastNextTurnRef.current = podcastNextTurn;
   }, [podcastNextTurn]);
@@ -825,23 +1090,59 @@ export default function Home() {
       podcastStopRequestedRef.current = false;
       podcastConfigRef.current = config;
       setPodcastConfig(config);
+      resetPodcastPipeline();
+      turnsCommittedRef.current = 0;
+      spawnCursorRef.current = 0;
+      podcastTopicRef.current = trimmed;
+
       try {
-        const res = await fetch("/api/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: trimmed.slice(0, 40),
-            mode: "podcast",
-            podcastConfig: JSON.stringify(config),
-          }),
-        });
-        if (!res.ok) throw new Error("Failed to create podcast session");
-        const session: Session = await res.json();
-        setSessions((prev) => [session, ...prev]);
+        let session: Session;
+        const currentSession = sessions.find((s) => s.id === activeSessionId);
+        const isCurrentEmpty = messages.length === 0;
+
+        if (currentSession && isCurrentEmpty) {
+          // Reuse active empty session instead of creating a duplicate session
+          const res = await fetch(`/api/sessions/${activeSessionId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmed.slice(0, 40),
+              mode: "podcast",
+              podcastConfig: JSON.stringify(config),
+            }),
+          });
+          if (!res.ok) throw new Error("Failed to update podcast session");
+          session = await res.json();
+          setSessions((prev) =>
+            prev.map((s) => (s.id === session.id ? session : s))
+          );
+        } else {
+          // Create new podcast session
+          const res = await fetch("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmed.slice(0, 40),
+              mode: "podcast",
+              podcastConfig: JSON.stringify(config),
+            }),
+          });
+          if (!res.ok) throw new Error("Failed to create podcast session");
+          session = await res.json();
+          setSessions((prev) => [session, ...prev]);
+        }
+
         setActiveSessionId(session.id);
+        podcastSessionIdRef.current = session.id;
+
         setMessages([]);
+        podcastMessagesRef.current = [];
+
         const saved = await saveMessage(session.id, "user", trimmed);
-        if (saved) setMessages([saved]);
+        if (saved) {
+          setMessages([saved]);
+          podcastMessagesRef.current = [saved];
+        }
 
         podcastStateRef.current = {
           status: "running",
@@ -855,39 +1156,17 @@ export default function Home() {
         console.error("handleStartPodcast error:", err);
       }
     },
-    [saveMessage, podcastNextTurn]
+    [activeSessionId, messages.length, saveMessage, podcastNextTurn, resetPodcastPipeline, sessions]
   );
 
   // Lanjutkan sesi podcast yang udah ada (dari history).
-  const handleResumePodcast = useCallback(async () => {
-    const sessionId = podcastSessionIdRef.current;
-    if (!sessionId) return;
-    podcastStopRequestedRef.current = false;
-    const st = podcastStateRef.current;
-    let turnCount = st.turnCount;
-    // Resume dari paused → lanjut di posisi yang sama (turnCount udah bener).
-    // Resume dari stopped/idle → hitung ulang dari transkrip.
-    if (st.status === "stopped" || st.status === "idle") {
-      turnCount = podcastMessagesRef.current.filter(
-        (m) =>
-          m.role === "assistant" &&
-          m.speaker &&
-          !m.id.startsWith("temp-") &&
-          !m.id.startsWith("assist-") &&
-          !m.id.startsWith("error-")
-      ).length;
-    }
-    podcastStateRef.current = {
-      status: "running",
-      turnCount,
-      config: podcastConfigRef.current,
-    };
-    setPodcastStatus("running");
-    setPodcastTurnCount(turnCount);
-    await podcastNextTurn();
-  }, [podcastNextTurn]);
-
-  // Putar ulang semua turn on-air dari transkrip (TTS + cache bikin murah).
+  
+  // Lanjut dari bubble tertentu: baca bubble yang diklik + bubble-bubble di
+  // bawahnya yang belum pernah diputar, baru setelah habis → generate giliran
+  // baru. NGGAK truncate — kelanjutan yang udah ada tetep dibaca dulu.
+  // Prefetch audio pesan BERIKUTNYA selama pesan sekarang diputar (seamless).
+  // Putar ulang semua turn on-air dari transkrip — prefetch pesan BERIKUTNYA
+  // selama pesan sekarang diputar, jadi transisi antar-bubble seamless.
   const handleReplayPodcast = useCallback(async () => {
     const turns = podcastMessagesRef.current.filter(
       (m) =>
@@ -900,33 +1179,41 @@ export default function Home() {
     podcastStopRequestedRef.current = false;
     setPodcastReplaying(true);
     try {
-      for (const m of turns) {
+      let nextPrefetch: Promise<string | null> | null =
+        turns.length > 1 ? prefetchMessageAudio(turns[1]) : null;
+
+      for (let i = 0; i < turns.length; i++) {
         if (podcastStopRequestedRef.current) break;
-        const speaker = (m.speaker as Speaker) ?? "host";
-        const clean = sanitizeForTts(m.content);
-        if (!clean) continue;
-        setPodcastPlayingId(m.id);
-        try {
-          const { voice, pitchShift } = voiceFor(speaker);
-          const res = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: clean, voice, pitchShift }),
-          });
-          if (res.ok) {
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            await playPodcastAudio(url);
-          }
-        } catch (err) {
-          console.error("[Podcast] replay error:", err);
+        const msg = turns[i];
+
+        const currentPrefetch =
+          i === 0
+            ? prefetchMessageAudio(msg) // pertama: langsung fetch sendiri
+            : (nextPrefetch ?? prefetchMessageAudio(msg)); // lainnya: prefetch sudah jalan
+
+        setPodcastLoadingId(msg.id);
+
+        // Selama menunggu bubble ini siap, mulai prefetch bubble BERIKUTNYA.
+        if (i + 1 < turns.length) {
+          nextPrefetch = prefetchMessageAudio(turns[i + 1]);
+        } else {
+          nextPrefetch = null;
         }
+
+        const url = await currentPrefetch;
+        setPodcastLoadingId(null);
+        if (!url) {
+          console.warn("[Podcast] replay: audio null", msg.id);
+          continue;
+        }
+        setPodcastPlayingId(msg.id);
+        await playPodcastAudio(url);
         setPodcastPlayingId(null);
       }
     } finally {
       setPodcastReplaying(false);
     }
-  }, [playPodcastAudio]);
+  }, [playPodcastAudio, prefetchMessageAudio]);
 
   const handleStopPodcast = useCallback(() => {
     podcastStopRequestedRef.current = true;
@@ -944,26 +1231,9 @@ export default function Home() {
     setPodcastNeedsGesture(false);
     setPodcastStreamingId(null);
     setPodcastPlayingId(null);
-  }, []);
-
-  // Pause — berhenti di tempat (audio + turn yang lagi jalan di-jeda),
-  // lanjut nanti dari posisi yang sama tanpa kehilangan konteks.
-  const handlePausePodcast = useCallback(() => {
-    podcastStateRef.current = { ...podcastStateRef.current, status: "paused" };
-    setPodcastStatus("paused");
-    podcastTurnAbortRef.current?.abort();
-    podcastAudioRef.current?.pause();
-    podcastAudioResolveRef.current?.(false);
-    podcastAudioResolveRef.current = null;
-    const pending = pendingAudioRef.current;
-    if (pending) {
-      pending.resolve(false);
-      pendingAudioRef.current = null;
-    }
-    setPodcastNeedsGesture(false);
-    setPodcastStreamingId(null);
-    setPodcastPlayingId(null);
-  }, []);
+    setPodcastLoadingId(null);
+    resetPodcastPipeline();
+  }, [resetPodcastPipeline]);
 
   // Interjeksi (prompter note) — di-persist sebagai pesan user (off-air),
   // lalu dikirim ke giliran berikutnya sebagai note produser.
@@ -978,6 +1248,9 @@ export default function Home() {
       setMessages((prev) => [...prev, saved]);
     }
   }, [podcastNoteInput, saveMessage]);
+
+  // Pastikan loading indicator gak nyangkut kalo stop/pause dipanggil pas
+  // audio lagi di-fetch (mis. user klik stop pas strip loading masih tampil).
 
   // ─── Regenerate response ──────────────────────────────────
   const handleRegenerate = useCallback(async () => {
@@ -1639,14 +1912,13 @@ export default function Home() {
             podcastActiveSpeaker={podcastActiveSpeaker}
             podcastStreamingId={podcastStreamingId}
             podcastPlayingId={podcastPlayingId}
+            podcastLoadingId={podcastLoadingId}
             podcastNeedsGesture={podcastNeedsGesture}
             podcastNoteInput={podcastNoteInput}
             podcastReplaying={podcastReplaying}
             onNoteInputChange={setPodcastNoteInput}
             onSendNote={handlePodcastNote}
             onStart={handleStartPodcast}
-            onResume={handleResumePodcast}
-            onPause={handlePausePodcast}
             onReplay={handleReplayPodcast}
             onStop={handleStopPodcast}
             onResumeGesture={resumePodcastAudio}

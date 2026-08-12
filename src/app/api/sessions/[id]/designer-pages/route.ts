@@ -10,7 +10,7 @@ export async function GET(
 
   const pages = await prisma.designerPage.findMany({
     where: { sessionId: id },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }],
     select: {
       id: true,
       name: true,

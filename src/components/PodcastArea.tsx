@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   Mic,
   Play,
-  Pause,
   Square,
   Send,
   Volume2,
@@ -20,19 +19,18 @@ type PodcastAreaProps = {
   sessionTitle?: string;
   messages: Message[];
   podcastConfig: PodcastConfig;
-  podcastStatus: "idle" | "running" | "paused" | "stopped";
+  podcastStatus: "idle" | "running" | "stopped";
   podcastTurnCount: number;
   podcastActiveSpeaker: Speaker | null;
   podcastStreamingId: string | null;
   podcastPlayingId: string | null;
+  podcastLoadingId: string | null;
   podcastNeedsGesture: boolean;
   podcastNoteInput: string;
   podcastReplaying: boolean;
   onNoteInputChange: (v: string) => void;
   onSendNote: () => void;
   onStart: (topic: string, config: PodcastConfig) => void;
-  onResume: () => void;
-  onPause: () => void;
   onReplay: () => void;
   onStop: () => void;
   onResumeGesture: () => void;
@@ -63,23 +61,31 @@ function SpeakerBubble({
   content,
   streaming,
   playing,
+  loading,
 }: {
   speaker: Speaker;
   name: string;
   content: string;
   streaming?: boolean;
   playing?: boolean;
+  loading?: boolean;
 }) {
   const style = SPEAKER_STYLE[speaker];
   const Icon = style.icon;
   return (
     <div
-      className={`flex gap-3 rounded-xl border px-4 py-3 ${
-        playing
-          ? "border-zinc-600 bg-zinc-800/60"
+      className={`group relative flex gap-3 rounded-xl border px-4 py-3 overflow-hidden ${
+        playing || loading
+          ? "border-amber-500/50 bg-amber-950/20 ring-1 ring-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.1)]"
           : "border-zinc-800 bg-zinc-900/40"
       }`}
     >
+      {loading && (
+        <>
+          <span className="podcast-loading-strip podcast-loading-strip-top" />
+          <span className="podcast-loading-strip podcast-loading-strip-bottom" />
+        </>
+      )}
       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-800">
         <Icon size={15} className={style.dot === "bg-sky-400" ? "text-sky-400" : style.dot === "bg-pink-400" ? "text-pink-400" : "text-emerald-400"} />
       </div>
@@ -117,14 +123,13 @@ export default function PodcastArea({
   podcastActiveSpeaker,
   podcastStreamingId,
   podcastPlayingId,
+  podcastLoadingId,
   podcastNeedsGesture,
   podcastNoteInput,
   podcastReplaying,
   onNoteInputChange,
   onSendNote,
   onStart,
-  onResume,
-  onPause,
   onReplay,
   onStop,
   onResumeGesture,
@@ -262,71 +267,29 @@ export default function PodcastArea({
               LIVE · {podcastConfig.names[podcastActiveSpeaker] ?? "Giliran"} lagi bicara
             </span>
           )}
-          {podcastStatus === "paused" && (
-            <span className="flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
-              PAUSED
-            </span>
-          )}
           <span className="text-[11px] text-zinc-500">
             Giliran {podcastTurnCount}/{podcastConfig.maxTurns}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {podcastStatus === "running" ? (
-            <>
-              <button
-                onClick={onPause}
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-              >
-                <Pause size={13} />
-                Pause
-              </button>
-              <button
-                onClick={onStop}
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-              >
-                <Square size={13} />
-                Stop
-              </button>
-            </>
-          ) : podcastStatus === "paused" ? (
-            <>
-              <button
-                onClick={onResume}
-                className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
-              >
-                <Play size={13} />
-                Lanjut
-              </button>
-              <button
-                onClick={onStop}
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-              >
-                <Square size={13} />
-                Stop
-              </button>
-            </>
-          ) : (
-            hasTurns && (
-              <>
-                <button
-                  onClick={onReplay}
-                  disabled={podcastReplaying}
-                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-                >
-                  <RotateCcw size={13} />
-                  {podcastReplaying ? "Memutar…" : "Putar Ulang"}
-                </button>
-                <button
-                  onClick={onResume}
-                  className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
-                >
-                  <Play size={13} />
-                  Lanjutkan
-                </button>
-              </>
-            )
+          {podcastStatus === "running" && (
+            <button
+              onClick={onStop}
+              title="Hentikan podcast di akhir giliran"
+              className="flex items-center gap-1.5 rounded-lg border border-red-700/60 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-950/40"
+            >
+              <Square size={13} />
+              Stop
+            </button>
+          )}
+          {podcastStatus === "stopped" && hasTurns && (
+            <button
+              onClick={onReplay}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+            >
+              <RotateCcw size={13} />
+              Putar ulang
+            </button>
           )}
         </div>
       </div>
@@ -358,6 +321,7 @@ export default function PodcastArea({
               content={m.content}
               streaming={podcastStreamingId === m.id}
               playing={podcastPlayingId === m.id}
+              loading={podcastLoadingId === m.id}
             />
           );
         })}

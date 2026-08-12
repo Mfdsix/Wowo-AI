@@ -70,20 +70,9 @@ export async function synthesize(
     if (lastErr) throw lastErr;
 
     let finalPath = rawPath;
-    if (shift !== 0) {
-      // Asetrate turunin pitch, aresample normalisasi sample rate, atempo balikin durasi.
-      const factor = Math.pow(2, -shift / 12);
-      const atempo = 1 / factor;
-      const filter = `asetrate=48000*${factor.toFixed(6)},aresample=44100,atempo=${atempo.toFixed(6)}`;
-      await execFileAsync(
-        FFMPEG,
-        ["-y", "-loglevel", "error", "-i", rawPath, "-af", filter, outPath],
-        { timeout: 30000 }
-      );
-      finalPath = outPath;
-    }
-
+    // PITCH SHIFT DIMATIIN. Balikin ke raw audio original dari Edge-TTS.
     const buf = await readFile(finalPath);
+
     if (ttsCache.size >= CACHE_MAX) {
       const oldest = ttsCache.keys().next().value;
       if (oldest !== undefined) ttsCache.delete(oldest);

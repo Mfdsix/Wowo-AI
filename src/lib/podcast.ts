@@ -61,13 +61,16 @@ const RULES = `Aturan giliran:
 
 export function buildPodcastSystemPrompt(
   speaker: Speaker,
-  names: Record<Speaker, string>
+  names: Record<Speaker, string>,
+  topic: string
 ): string {
   const all = SPEAKER_ORDER.map(
     (s) => `- ${names[s]}: ${PERSONAS[s]}`
   ).join("\n");
   return [
     "Kamu adalah penulis naskah talkshow radio Indonesia yang hidup dan natural.",
+    `TOPIK UTAMA DISKUSI: "${topic}"`,
+    "SANGAT PENTING: Pembicaraan WAJIB berfokus pada TOPIK UTAMA DISKUSI di atas. DILARANG KERAS membicarakan topik lain seperti WFA, hobi, atau hal di luar topik utama.",
     "",
     "Pemain:",
     all,
