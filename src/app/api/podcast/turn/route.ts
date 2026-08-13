@@ -5,7 +5,9 @@ import {
   buildHistoryForModel,
   buildPodcastSystemPrompt,
   DEFAULT_PODCAST_CONFIG,
+  PODCAST_HISTORY_LIMIT,
   SPEAKER_ORDER,
+  ThinkingStripper,
   type PodcastHistoryEntry,
   type Speaker,
 } from "@/lib/podcast";
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest) {
         (h.role === "user" || h.role === "assistant") &&
         typeof h.content === "string"
     )
-    .slice(-30); // cap konteks biar gak meledak di window
+    .slice(-PODCAST_HISTORY_LIMIT); // cap konteks — prompt pendek = prefill cepat
 
   // Nama speaker — dari request (frontend kirim sesuai podcastConfig session), fallback default.
   const names: Record<Speaker, string> = {
@@ -105,9 +107,15 @@ export async function POST(req: NextRequest) {
             maxRetries: 0,
             abortSignal: req.signal,
           });
+          // Model hybrid-reasoning nulis blok <think> sebelum jawaban asli —
+          // strip dari stream biar isi proses berpikir gak ikut ke-TTS.
+          const stripper = new ThinkingStripper();
           for await (const chunk of result.textStream) {
-            controller.enqueue(new TextEncoder().encode(chunk));
+            const safe = stripper.transform(chunk);
+            if (safe) controller.enqueue(new TextEncoder().encode(safe));
           }
+          const tail = stripper.flush();
+          if (tail) controller.enqueue(new TextEncoder().encode(tail));
         } catch (err) {
           console.error("[Podcast] LLM stream error:", err);
           const msg = errorMessage(err);

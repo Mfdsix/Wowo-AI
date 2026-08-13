@@ -11,9 +11,12 @@ import DesignerPrompt from "@/components/DesignerPrompt";
 import PodcastArea from "@/components/PodcastArea";
 import {
   DEFAULT_PODCAST_CONFIG,
+  PODCAST_HISTORY_LIMIT,
   speakerAt,
   sanitizeForTts,
   voiceFor,
+  cleanTurnText,
+  isInstructionEcho,
   type Speaker,
   type PodcastConfig,
 } from "@/lib/podcast";
@@ -144,6 +147,7 @@ export default function Home() {
   const [podcastNeedsGesture, setPodcastNeedsGesture] = useState(false);
   const [podcastNoteInput, setPodcastNoteInput] = useState("");
   const [podcastReplaying, setPodcastReplaying] = useState(false);
+  const [isAudioPaused, setIsAudioPaused] = useState(false);
   // Refs: source of truth buat loop async biar gak kena stale-closure.
   // Status/turnCount/config dibaca dari sini, state cuma buat render.
   const podcastStateRef = useRef({
@@ -715,11 +719,20 @@ export default function Home() {
         if (pendingAudioRef.current?.url === url) pendingAudioRef.current = null;
         resolve(ok);
       };
-      audio.onended = () => finish(true);
-      audio.onerror = () => finish(false);
+      audio.onended = () => {
+        setIsAudioPaused(false);
+        finish(true);
+      };
+      audio.onerror = () => {
+        setIsAudioPaused(false);
+        finish(false);
+      };
       const p = audio.play();
       if (p) {
-        p.then(() => setPodcastNeedsGesture(false)).catch(() => {
+        p.then(() => {
+          setIsAudioPaused(false);
+          setPodcastNeedsGesture(false);
+        }).catch(() => {
           setPodcastNeedsGesture(true);
           pendingAudioRef.current = { url, resolve };
         });
@@ -748,6 +761,21 @@ export default function Home() {
         pending.resolve(false);
         pendingAudioRef.current = null;
       });
+  }, []);
+
+  // Toggle pause/play untuk chunk audio yang sedang diputar.
+  const togglePausePlayAudio = useCallback(() => {
+    const audio = podcastAudioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      audio
+        .play()
+        .then(() => setIsAudioPaused(false))
+        .catch(() => {});
+    } else {
+      audio.pause();
+      setIsAudioPaused(true);
+    }
   }, []);
 
   // ─── Chunked TTS helpers ──────────────────────────────────────────
@@ -820,13 +848,16 @@ export default function Home() {
     const speaker = speakerAt(turnIndex);
     const tempId = `assist-${crypto.randomUUID()}`;
 
-    // Bangun history dari turn yang udah commit + teks paralel yang udah final.
+    // Bangun history dari turn yang udah commit + teks paralel yang udah final
+    // (turn yang teksnya kelar tapi audio masih diputar, belum masuk messages).
+    // Turn yang SUDAH commit ada di messages DAN di parallelTexts — dedupe by
+    // konten biar prompt gak dobel (dobel = prefill makin lambat di turn lanjut).
     const msgs = podcastMessagesRef.current.filter(
       (m) =>
         m.role === "assistant" && m.speaker &&
         !m.id.startsWith("temp-") && !m.id.startsWith("assist-") && !m.id.startsWith("error-")
     );
-    const history = msgs.map((m) => ({
+    const allHistory = msgs.map((m) => ({
       role: "assistant" as const,
       speaker: m.speaker ?? null,
       content: m.content,
@@ -836,11 +867,16 @@ export default function Home() {
       .filter((t) => t < turnIndex)
       .sort((a, b) => a - b);
     for (const t of ptKeys) {
-      // Semua turn sebelumnya yang sudah punya teks (parallelTexts)
-      // HARUS masuk history supaya model punya konteks penuh.
-      // `turnsCommittedRef` hanya untuk UI gating, bukan untuk context.
-      history.push({ role: "assistant", speaker: parallelTextsRef.current[t].speaker, content: parallelTextsRef.current[t].content });
+      const pt = parallelTextsRef.current[t];
+      if (!pt?.content) continue;
+      if (allHistory.some((h) => h.speaker === pt.speaker && h.content === pt.content)) continue;
+      // Turn yang teksnya udah final tapi belum commit (audio masih muter)
+      // HARUS masuk history biar model punya konteks penuh.
+      allHistory.push({ role: "assistant", speaker: pt.speaker, content: pt.content });
     }
+    // Window terbatas: model cuma butuh beberapa ronde terakhir. Prompt pendek
+    // = prefill cepat = transisi antar-turn lebih mulus.
+    const history = allHistory.slice(-PODCAST_HISTORY_LIMIT);
     const firstUser = podcastMessagesRef.current.find(
       (m) => m.role === "user" && !m.id.startsWith("temp-")
     );
@@ -855,10 +891,14 @@ export default function Home() {
       if (turnIndex >= turnsCommittedRef.current) {
         turnsCommittedRef.current = turnIndex + 1;
         setPodcastTurnCount(turnIndex + 1);
-        setPodcastActiveSpeaker(speaker);
+        // JANGAN set podcastActiveSpeaker di sini — itu bakal nge-trigger
+        // indikator "sedang bicara" padahal AI masih mikir (generating).
+        // Speaker aktif di-set di podcastNextTurn saat chunk audio pertama diputar.
       }
       streamBubbleId = tempId;
       setPodcastStreamingId(tempId);
+      // Set loading indicator: AI lagi generate teks untuk speaker ini
+      setPodcastLoadingId(tempId);
       setMessages((prev) => [
         ...prev,
         { id: tempId, role: "assistant", speaker, content: "", attachments: [] },
@@ -915,24 +955,41 @@ export default function Home() {
             const sentence = sentenceBuffer.slice(0, idx).trim();
             sentenceBuffer = sentenceBuffer.slice(idx);
             if (!sentence) continue;
+            // Skip TTS kalau kalimatnya jelas echo instruksi (model lemah
+            // kadang nulis ulang system prompt sebagai "ucapan").
+            if (isInstructionEcho(sentence)) continue;
             pushOrdered(fetchTtsChunk(sentence, speaker, abort.signal));
           }
 
           if (streamBubbleId) {
             setMessages((prev) =>
-              prev.map((m) => (m.id === streamBubbleId ? { ...m, content: fullText } : m))
+              prev.map((m) =>
+                m.id === streamBubbleId
+                  ? { ...m, content: cleanTurnText(fullText) }
+                  : m
+              )
             );
           }
         }
       decoder.decode();
 
         const remaining = sentenceBuffer.trim();
-        if (remaining) {
+        if (remaining && !isInstructionEcho(remaining)) {
           pushOrdered(fetchTtsChunk(remaining, speaker, abort.signal));
         }
 
-        // Teks final udah ada di parallelTextsRef.
-        parallelTextsRef.current[turnIndex] = { speaker, content: fullText.trim() };
+        // Teks final di-clean dari echo instruksi sebelum dipakai display/simpan.
+        parallelTextsRef.current[turnIndex] = {
+          speaker,
+          content: cleanTurnText(fullText),
+        };
+
+        // Lookahead trigger #2: teks turn ini udah final → langsung spawn turn
+        // berikutnya, biar generate-nya overlap sama TTS + playback turn ini
+        // (konteks turn ini juga udah masuk ke history-nya). Guard di helper
+        // cegah dobel spawn — trigger #1 (chunk audio pertama diputar) bisa
+        // aja udah duluan manggil.
+        ensureNextTurnSpawnedRef.current?.(turnIndex);
 
         // End marker di-push SETELAH semua chunk chain selesai → nggak mendahului.
         void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
@@ -965,7 +1022,13 @@ export default function Home() {
 
     const finalize = async (): Promise<Message | null> => {
       if (!parallelTextsRef.current[turnIndex]) return null; // belum selesai / abort
-      const content = parallelTextsRef.current[turnIndex].content;
+      const content = parallelTextsRef.current[turnIndex].content?.trim();
+      // Jika konten kosong setelah clean (semua di-filter sebagai echo instruksi),
+      // jangan save ke DB — return null biar loop lanjut tanpa stop.
+      if (!content) {
+        console.warn(`[Podcast] Turn ${turnIndex} (${speaker}): empty content after clean, skipping persist`);
+        return null;
+      }
       const saved = await saveMessage(sessionId, "assistant", content, modelName ?? undefined, null, null, speaker);
       if (saved) {
         setMessages((prev) => {
@@ -988,6 +1051,20 @@ export default function Home() {
     const sessionId = podcastSessionIdRef.current;
     if (!sessionId) return;
     if (podcastStateRef.current.status !== "running") return;
+
+    // Lookahead: spawn turn berikutnya secepat mungkin. Dua trigger:
+    //  #1 chunk audio pertama turn ini mulai diputar (di loop bawah),
+    //  #2 teks turn ini SELESAI di-generate (di spawnTurn) — overlap lebih
+    //    besar buat model yang lambat, dan konteks turn ini udah masuk.
+    // Guard `spawnedTurnsRef` bikin trigger mana pun yang duluan yang jalan.
+    ensureNextTurnSpawnedRef.current = (afterTurn: number) => {
+      const nextTurn = afterTurn + 1;
+      if (podcastStateRef.current.status !== "running") return;
+      if (nextTurn >= podcastConfigRef.current.maxTurns) return;
+      if (spawnedTurnsRef.current[nextTurn]) return;
+      spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
+      spawnTurn(nextTurn, false);
+    };
 
     let turn = spawnCursorRef.current;
 
@@ -1013,6 +1090,7 @@ export default function Home() {
 
       // Play tiap chunk audio turn ini begitu siap.
       let hasTriggeredNextSpawn = false;
+      let firstChunkPlayed = false;
       while (true) {
         const chunk = await channelTake(turn);
         if (chunk.turn !== turn) return; // batal / cleanup
@@ -1023,36 +1101,29 @@ export default function Home() {
         const s2 = podcastStateRef.current.status;
         if (s2 !== "running") { URL.revokeObjectURL(chunk.item.url); continue; }
 
+        // First chunk: clear loading, set active speaker, start playing
+        if (!firstChunkPlayed) {
+          firstChunkPlayed = true;
+          setPodcastLoadingId(null);
+          setPodcastActiveSpeaker(spawned.speaker);
+        }
         setPodcastPlayingId(spawned.tempId);
 
         // SAAT TURN N MULAI MEMUTAR AUDIO: Trigger generate Turn N+1 di background!
-        // Ini menjaga lookahead strictly 1 turn ke depan (Host baca -> Tamu A generate).
+        // Trigger #1 dari dua trigger lookahead (yang lain: teks final di spawnTurn).
         if (!hasTriggeredNextSpawn) {
           hasTriggeredNextSpawn = true;
-          const nextTurn = turn + 1;
-          if (
-            nextTurn < podcastConfigRef.current.maxTurns &&
-            !spawnedTurnsRef.current[nextTurn]
-          ) {
-            spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
-            spawnTurn(nextTurn, false);
-          }
+          ensureNextTurnSpawnedRef.current?.(turn);
         }
 
         await playPodcastAudio(chunk.item.url);
       }
       setPodcastPlayingId(null);
+      setPodcastActiveSpeaker(null);
 
       // Jaga-jaga kalau turn ini tidak punya chunk audio sama sekali
       if (!hasTriggeredNextSpawn) {
-        const nextTurn = turn + 1;
-        if (
-          nextTurn < podcastConfigRef.current.maxTurns &&
-          !spawnedTurnsRef.current[nextTurn]
-        ) {
-          spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
-          spawnTurn(nextTurn, false);
-        }
+        ensureNextTurnSpawnedRef.current?.(turn);
       }
 
       // Teks final — confirm + persist. Kalau error → stop.
@@ -1065,12 +1136,10 @@ export default function Home() {
         return;
       }
       const saved = await spawned.finalize();
+      // finalize return null jika content kosong (di-filter semua echo instruksi).
+      // Jangan stop, lanjut ke turn berikutnya.
       if (!saved) {
-        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
-        setPodcastStatus("stopped");
-        setPodcastActiveSpeaker(null);
-        resetPodcastPipeline();
-        return;
+        console.log(`[Podcast] Turn ${turn} skipped (empty after clean), continuing...`);
       }
 
       turn += 1;
@@ -1185,6 +1254,7 @@ export default function Home() {
       for (let i = 0; i < turns.length; i++) {
         if (podcastStopRequestedRef.current) break;
         const msg = turns[i];
+        const speaker = (msg.speaker as Speaker) ?? "host";
 
         const currentPrefetch =
           i === 0
@@ -1206,9 +1276,11 @@ export default function Home() {
           console.warn("[Podcast] replay: audio null", msg.id);
           continue;
         }
+        setPodcastActiveSpeaker(speaker);
         setPodcastPlayingId(msg.id);
         await playPodcastAudio(url);
         setPodcastPlayingId(null);
+        setPodcastActiveSpeaker(null);
       }
     } finally {
       setPodcastReplaying(false);
@@ -1916,6 +1988,8 @@ export default function Home() {
             podcastNeedsGesture={podcastNeedsGesture}
             podcastNoteInput={podcastNoteInput}
             podcastReplaying={podcastReplaying}
+            isAudioPaused={isAudioPaused}
+            onTogglePausePlay={togglePausePlayAudio}
             onNoteInputChange={setPodcastNoteInput}
             onSendNote={handlePodcastNote}
             onStart={handleStartPodcast}

@@ -126,3 +126,14 @@ body {
   bottom: 0;
   border-radius: 0 0 14px 14px;
 }
+
+/* Marquee judul thumbnail — teks yang kepanjangan jalan horizontal, konten
+   di-duplikat biar loop-nya seamless (translate -50% dari lebar track). */
+@keyframes podcast-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
