@@ -27,6 +27,7 @@ export type Message = {
   role: "user" | "assistant";
   content: string;
   model?: string | null;
+  speaker?: string | null; // "host" | "guestA" | "guestB" — khusus turn on-air podcast
   bookmarked?: boolean;
   replyToId?: string | null;
   quoteText?: string | null;

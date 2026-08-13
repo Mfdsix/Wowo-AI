@@ -22,13 +22,27 @@ export async function PATCH(
   const body = await req.json().catch(() => ({}));
   const { title, designStyle } = body;
 
-  const data: { title?: string; designStyle?: string | null } = {};
+  const data: {
+    title?: string;
+    designStyle?: string | null;
+    mode?: string;
+    podcastConfig?: string | null;
+  } = {};
   if (typeof title === "string" && title.trim()) data.title = title.trim().slice(0, 100);
   if (typeof designStyle === "string") data.designStyle = designStyle || null; // "" → unlock
+  if (
+    typeof body.mode === "string" &&
+    ["chat", "designer", "podcast"].includes(body.mode)
+  ) {
+    data.mode = body.mode;
+  }
+  if (typeof body.podcastConfig === "string") {
+    data.podcastConfig = body.podcastConfig || null; // "" → hapus
+  }
 
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: "title atau designStyle wajib diisi" },
+      { error: "title, designStyle, mode, atau podcastConfig wajib diisi" },
       { status: 400 }
     );
   }
@@ -40,6 +54,8 @@ export async function PATCH(
       id: true,
       title: true,
       designStyle: true,
+      mode: true,
+      podcastConfig: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },
@@ -62,6 +78,8 @@ export async function GET(
       id: true,
       title: true,
       designStyle: true,
+      mode: true,
+      podcastConfig: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },

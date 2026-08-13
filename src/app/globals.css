@@ -92,3 +92,48 @@ body {
   border-radius: 0.5rem;
   margin: 0.75em 0;
 }
+
+/* Podcast bubble loading strip — dua strip bergerak di atas & bawah bubble
+   pas audio lagi disiapin (loading TTS). */
+@keyframes podcast-strip-move {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 28px 0;
+  }
+}
+.podcast-loading-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(129, 140, 248, 0.65),
+    rgba(129, 140, 248, 0.65) 8px,
+    transparent 8px,
+    transparent 16px
+  );
+  background-size: 28px 2px;
+  animation: podcast-strip-move 0.9s linear infinite;
+}
+.podcast-loading-strip-top {
+  top: 0;
+  border-radius: 14px 14px 0 0;
+}
+.podcast-loading-strip-bottom {
+  bottom: 0;
+  border-radius: 0 0 14px 14px;
+}
+
+/* Marquee judul thumbnail — teks yang kepanjangan jalan horizontal, konten
+   di-duplikat biar loop-nya seamless (translate -50% dari lebar track). */
+@keyframes podcast-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}

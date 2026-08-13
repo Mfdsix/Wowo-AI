@@ -1,21 +1,54 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { LayoutDashboard, MessagesSquare } from "lucide-react";
+import { LayoutDashboard, MessagesSquare, Mic } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput, { type PendingFile } from "@/components/MessageInput";
 import type { Message, ReplyTarget, AttachmentMeta, RetrievalSource } from "@/lib/types";
 import DesignerCanvas from "@/components/DesignerCanvas";
 import DesignerPrompt from "@/components/DesignerPrompt";
+import PodcastArea from "@/components/PodcastArea";
+import {
+  DEFAULT_PODCAST_CONFIG,
+  PODCAST_HISTORY_LIMIT,
+  speakerAt,
+  sanitizeForTts,
+  voiceFor,
+  cleanTurnText,
+  isInstructionEcho,
+  type Speaker,
+  type PodcastConfig,
+} from "@/lib/podcast";
 
 type Session = {
   id: string;
   title: string;
   designStyle?: string | null;
+  mode?: string;
+  podcastConfig?: string | null;
   createdAt: string;
   updatedAt: string;
   _count: { messages: number };
+};
+
+// Pecah teks jadi kalimat untuk TTS chunked.
+const SENTENCE_RE = /[.!?…]+[\s\n]+|[.!?…]+$/;
+
+// Chunk audio di channel: kind=chunk ada audio, kind=end sentinel akhir turn,
+// kind=failed TTS gagal (skip tanpa hentikan turn).
+type ChannelItem =
+  | { kind: "chunk"; url: string }
+  | { kind: "end" }
+  | { kind: "failed" };
+
+type SpawnedTurn = {
+  turnIndex: number;
+  speaker: Speaker;
+  tempId: string;
+  isTopBubble: boolean;
+  abort: AbortController;
+  finalize: () => Promise<Message | null>;
 };
 
 // Client-side caps — mirror caps di src/lib/attachments.ts
@@ -91,7 +124,7 @@ export default function Home() {
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
-  const [viewMode, setViewMode] = useState<"chat" | "designer">("chat");
+  const [viewMode, setViewMode] = useState<"chat" | "designer" | "podcast">("chat");
   const [designerPages, setDesignerPages] = useState<DesignerPage[]>([]);
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
@@ -102,6 +135,41 @@ export default function Home() {
   // Ref ke handleDesignerSubmit biar bisa dipanggil dari handleStyleChange
   // (yang dideklarasi lebih dulu — hindari "used before declaration")
   const designerSubmitRef = useRef<((prompt: string) => Promise<void>) | null>(null);
+
+  // ─── Podcast mode state ────────────────────────────────────────
+  const [podcastStatus, setPodcastStatus] = useState<"idle" | "running" | "stopped">("idle");
+  const [podcastTurnCount, setPodcastTurnCount] = useState(0);
+  const [podcastConfig, setPodcastConfig] = useState<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
+  const [podcastActiveSpeaker, setPodcastActiveSpeaker] = useState<Speaker | null>(null);
+  const [podcastStreamingId, setPodcastStreamingId] = useState<string | null>(null);
+  const [podcastPlayingId, setPodcastPlayingId] = useState<string | null>(null);
+  const [podcastLoadingId, setPodcastLoadingId] = useState<string | null>(null);
+  const [podcastNeedsGesture, setPodcastNeedsGesture] = useState(false);
+  const [podcastNoteInput, setPodcastNoteInput] = useState("");
+  const [podcastReplaying, setPodcastReplaying] = useState(false);
+  const [isAudioPaused, setIsAudioPaused] = useState(false);
+  // Refs: source of truth buat loop async biar gak kena stale-closure.
+  // Status/turnCount/config dibaca dari sini, state cuma buat render.
+  const podcastStateRef = useRef({
+    status: "idle" as "idle" | "running" | "stopped",
+    turnCount: 0,
+    config: DEFAULT_PODCAST_CONFIG,
+  });
+  // Ref ke fungsi loop — biar rekursi podcastNextTurn gak kena "accessed before declared"
+  const podcastNextTurnRef = useRef<(() => Promise<void>) | null>(null);
+  const podcastPendingNotesRef = useRef<string[]>([]);
+  const podcastTurnAbortRef = useRef<AbortController | null>(null);
+  const podcastStopRequestedRef = useRef(false);
+  const podcastAudioRef = useRef<HTMLAudioElement | null>(null);
+  // resolve dari turn yang lagi main — dipanggil pas pause/stop biar await gak nge-gantung.
+  const podcastAudioResolveRef = useRef<((ok: boolean) => void) | null>(null);
+  const pendingAudioRef = useRef<{ url: string; resolve: (ok: boolean) => void } | null>(null);
+  const podcastConfigRef = useRef<PodcastConfig>(DEFAULT_PODCAST_CONFIG);
+  const podcastMessagesRef = useRef<Message[]>([]);
+  const podcastSessionIdRef = useRef<string | null>(null);
+  const podcastTopicRef = useRef<string>("");
+  useEffect(() => { podcastMessagesRef.current = messages; }, [messages]);
+  useEffect(() => { podcastSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
   // ─── Fetch all sessions ────────────────────────────────────
   const fetchSessions = useCallback(async () => {
@@ -124,6 +192,8 @@ export default function Home() {
       if (!res.ok) throw new Error("Failed to fetch messages");
       const data: Message[] = await res.json();
       setMessages(data);
+      podcastMessagesRef.current = data;
+      podcastTopicRef.current = data.find((m) => m.role === "user")?.content ?? "";
     } catch (err) {
       console.error("fetchMessages error:", err);
     }
@@ -142,7 +212,8 @@ export default function Home() {
       content: string,
       model?: string,
       replyToId?: string | null,
-      quoteText?: string | null
+      quoteText?: string | null,
+      speaker?: string | null
     ) => {
       try {
         const res = await fetch(`/api/sessions/${sessionId}/messages`, {
@@ -154,6 +225,7 @@ export default function Home() {
             model,
             replyToId: replyToId || null,
             quoteText: quoteText || null,
+            speaker: speaker || null,
           }),
         });
         if (!res.ok) throw new Error("Failed to save message");
@@ -233,6 +305,10 @@ export default function Home() {
 
   // ─── New session ────────────────────────────────────────────
   const handleNewSession = useCallback(async () => {
+    // Kalau session yang aktif sekarang udah kosong (0 messages), tinggal pake session ini aja.
+    if (activeSessionId && messages.length === 0) {
+      return;
+    }
     try {
       const res = await fetch("/api/sessions", {
         method: "POST",
@@ -243,23 +319,115 @@ export default function Home() {
       const session: Session = await res.json();
       setSessions((prev) => [session, ...prev]);
       setActiveSessionId(session.id);
+      podcastSessionIdRef.current = session.id;
       setMessages([]);
+      podcastMessagesRef.current = [];
+      podcastTopicRef.current = "";
     } catch (err) {
       console.error("handleNewSession error:", err);
     }
+  }, [activeSessionId, messages.length]);
+
+  // ─── Podcast pipeline refs & helpers ─────────────────────────────────
+  const turnsCommittedRef = useRef(0);       // turn yang udah commit (persisted atau temp bubble)
+  const spawnCursorRef = useRef(0);          // index turn yang akan di-spawn berikutnya
+  const parallelTextsRef = useRef<Record<number, { speaker: Speaker; content: string }>>({});
+  const channelRef = useRef<{
+    queue: ((turn: number, item: ChannelItem) => void)[];
+    buf: { turn: number; item: ChannelItem }[];
+  }>({ queue: [], buf: [] });
+  const spawnedTurnsRef = useRef<Record<number, SpawnedTurn>>({});
+  const nextTurnEnqueuedRef = useRef(false); // guard: spawn N+1 jangan dobel
+  const ensureNextTurnSpawnedRef = useRef<((afterTurn: number) => void) | null>(null);
+  const channelPush = useCallback((turn: number, item: ChannelItem) => {
+    const c = channelRef.current;
+    if (c.queue.length) { c.queue.shift()!(turn, item); return; }
+    c.buf.push({ turn, item });
   }, []);
+  const channelTake = useCallback((expectedTurn: number) =>
+    new Promise<{ turn: number; item: ChannelItem }>((resolve) => {
+      const c = channelRef.current;
+      const i = c.buf.findIndex((b) => b.turn === expectedTurn);
+      if (i >= 0) { const e = c.buf.splice(i, 1)[0]; resolve({ turn: e.turn, item: e.item }); return; }
+      c.queue.push((turn, item) => resolve({ turn, item }));
+    }), []);
+  const channelClear = useCallback(() => {
+    const c = channelRef.current;
+    for (const r of c.queue.splice(0)) r(-1, { kind: "failed" }); // bangunin waiter → batal
+    for (const b of c.buf.splice(0)) if (b.item.kind === "chunk") URL.revokeObjectURL(b.item.url);
+  }, []);
+  const resetPodcastPipeline = useCallback(() => {
+    channelClear();
+    parallelTextsRef.current = {};
+    spawnedTurnsRef.current = {};
+    nextTurnEnqueuedRef.current = false;
+    spawnCursorRef.current = 0;
+    turnsCommittedRef.current = 0;
+  }, [channelClear]);
+
+  // Sinkronkan pipeline refs sama transkrip yang udah tersimpan — belum
+  // dipakai sebagai hook eksternal, tapi disimpan buat dipakai pipeline.
+  const syncPipelineToTranscript = useCallback(() => {
+    channelClear();
+    parallelTextsRef.current = {};
+    spawnedTurnsRef.current = {};
+    nextTurnEnqueuedRef.current = false;
+    const count = podcastMessagesRef.current.filter(
+      (m) =>
+        m.role === "assistant" && m.speaker &&
+        !m.id.startsWith("temp-") && !m.id.startsWith("assist-") && !m.id.startsWith("error-")
+    ).length;
+    spawnCursorRef.current = count;
+    turnsCommittedRef.current = count;
+  }, [channelClear]);
 
   // ─── Select session ─────────────────────────────────────────
   const handleSelectSession = useCallback(
     async (id: string) => {
       if (id === activeSessionId) return;
+      // Stop podcast yang lagi jalan sebelum pindah session
+      podcastTurnAbortRef.current?.abort();
+      podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+      setPodcastStatus("stopped");
+      setPodcastStreamingId(null);
+      setPodcastPlayingId(null);
+      setPodcastLoadingId(null);
+      resetPodcastPipeline();
+
       setActiveSessionId(id);
+      podcastSessionIdRef.current = id;
       setMessages([]);
+      podcastMessagesRef.current = [];
+      podcastTopicRef.current = "";
       setIsLoading(false);
       abortRef.current?.abort();
+
+      // Kalau session podcast → load config + pindah ke view podcast
+      const sess = sessions.find((s) => s.id === id);
+      if (sess?.mode === "podcast") {
+        setViewMode("podcast");
+        let cfg = DEFAULT_PODCAST_CONFIG;
+        if (sess.podcastConfig) {
+          try {
+            const parsed = JSON.parse(sess.podcastConfig) as Partial<PodcastConfig>;
+            cfg = {
+              names: {
+                ...DEFAULT_PODCAST_CONFIG.names,
+                ...(parsed.names ?? {}),
+              },
+              maxTurns: parsed.maxTurns ?? DEFAULT_PODCAST_CONFIG.maxTurns,
+            };
+          } catch {
+            // config rusak → default
+          }
+        }
+        podcastConfigRef.current = cfg;
+        setPodcastConfig(cfg);
+        podcastStateRef.current = { ...podcastStateRef.current, config: cfg };
+      }
       await fetchMessages(id);
     },
-    [activeSessionId, fetchMessages]
+    [activeSessionId, fetchMessages, sessions, resetPodcastPipeline]
   );
 
   // ─── Delete session ─────────────────────────────────────────
@@ -531,6 +699,630 @@ export default function Home() {
       fetchSessions();
     }
   }, [input, activeSessionId, isLoading, messages, replyTarget, pendingFiles, clearPendingFiles, sessions, saveMessage, updateSessionTitle, fetchSessions]);
+
+  // ─── Podcast mode: orchestrator ────────────────────────────────
+  // Semua nilai yang dibaca loop async diambil dari ref biar gak kena stale-closure.
+  // State cuma buat render.
+
+  // Play blob audio; resolve pas audio selesai / error. Kalau autoplay diblokir
+  // (butuh gesture), pending sampe user klik "lanjut audio".
+  const playPodcastAudio = useCallback((url: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const audio = new Audio(url);
+      podcastAudioRef.current?.pause();
+      podcastAudioRef.current = audio;
+      podcastAudioResolveRef.current = resolve;
+      const finish = (ok: boolean) => {
+        URL.revokeObjectURL(url);
+        if (podcastAudioRef.current === audio) podcastAudioRef.current = null;
+        if (podcastAudioResolveRef.current === resolve) podcastAudioResolveRef.current = null;
+        if (pendingAudioRef.current?.url === url) pendingAudioRef.current = null;
+        resolve(ok);
+      };
+      audio.onended = () => {
+        setIsAudioPaused(false);
+        finish(true);
+      };
+      audio.onerror = () => {
+        setIsAudioPaused(false);
+        finish(false);
+      };
+      const p = audio.play();
+      if (p) {
+        p.then(() => {
+          setIsAudioPaused(false);
+          setPodcastNeedsGesture(false);
+        }).catch(() => {
+          setPodcastNeedsGesture(true);
+          pendingAudioRef.current = { url, resolve };
+        });
+      } else {
+        finish(false);
+      }
+    });
+  }, []);
+
+  const resumePodcastAudio = useCallback(() => {
+    const pending = pendingAudioRef.current;
+    setPodcastNeedsGesture(false);
+    if (!pending) return;
+    const audio = podcastAudioRef.current;
+    if (!audio) {
+      pending.resolve(false);
+      pendingAudioRef.current = null;
+      return;
+    }
+    audio
+      .play()
+      .then(() => {
+        pendingAudioRef.current = null;
+      })
+      .catch(() => {
+        pending.resolve(false);
+        pendingAudioRef.current = null;
+      });
+  }, []);
+
+  // Toggle pause/play untuk chunk audio yang sedang diputar.
+  const togglePausePlayAudio = useCallback(() => {
+    const audio = podcastAudioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      audio
+        .play()
+        .then(() => setIsAudioPaused(false))
+        .catch(() => {});
+    } else {
+      audio.pause();
+      setIsAudioPaused(true);
+    }
+  }, []);
+
+  // ─── Chunked TTS helpers ──────────────────────────────────────────
+  // SENTENCE_RE dipindah ke level modul (dipakai juga di spawnTurn).
+
+  /** Fire TTS request, return Promise<string|null> (object URL or null on error). */
+  const fetchTtsChunk = useCallback(
+    async (text: string, speaker: Speaker, signal?: AbortSignal): Promise<string | null> => {
+      const clean = sanitizeForTts(text);
+      if (!clean) return null;
+      const { voice, pitchShift } = voiceFor(speaker);
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: clean, voice, pitchShift }),
+          signal,
+        });
+        if (!res.ok) {
+          console.error("[Podcast] TTS chunk failed:", res.status);
+          return null;
+        }
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      } catch (err) {
+        if (signal?.aborted) return null;
+        console.error("[Podcast] TTS chunk error:", err);
+        return null;
+      }
+    },
+    []
+  );
+
+  // Fetch TTS SELURUH konten satu pesan jadi satu blob audio. Dipakai buat
+  // "Lanjut dari sini" & replay — pesan BERIKUTNYA di-prefetch selama pesan
+  // sekarang diputar, jadi transisi antar-bubble seamless.
+  // Return Promise yang resolve URL audio (atau null) — caller yang await
+  // tepat sebelum bubble itu mau diputar, jadi fetch jalan paralel dgn playback.
+  const prefetchMessageAudio = useCallback(
+    async (msg: Message): Promise<string | null> => {
+      const speaker = (msg.speaker as Speaker) ?? "host";
+      const clean = sanitizeForTts(msg.content);
+      if (!clean) return null;
+      try {
+        const { voice, pitchShift } = voiceFor(speaker);
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: clean, voice, pitchShift }),
+        });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      } catch (err) {
+        console.error("[Podcast] prefetchTts error:", err);
+        return null;
+      }
+    },
+    []
+  );
+
+  // ─── Orchestrator podcast: lookahead pipeline ─────────────────────────
+  // spawnTurn jalanin generate+TTS di background; hasil teks masuk
+  // parallelTextsRef, chunk audio masuk channel. Player loop konsumsi
+  // channel, konfirmasi teks ke DB, lalu spawn turn berikutnya. Turn yang
+  // ke-spawn dipertahanin pas pause → resume instan.
+  const spawnTurn = useCallback((turnIndex: number, stick: boolean) => {
+    const sessionId = podcastSessionIdRef.current;
+    if (!sessionId) return;
+    const speaker = speakerAt(turnIndex);
+    const tempId = `assist-${crypto.randomUUID()}`;
+
+    // Bangun history dari turn yang udah commit + teks paralel yang udah final
+    // (turn yang teksnya kelar tapi audio masih diputar, belum masuk messages).
+    // Turn yang SUDAH commit ada di messages DAN di parallelTexts — dedupe by
+    // konten biar prompt gak dobel (dobel = prefill makin lambat di turn lanjut).
+    const msgs = podcastMessagesRef.current.filter(
+      (m) =>
+        m.role === "assistant" && m.speaker &&
+        !m.id.startsWith("temp-") && !m.id.startsWith("assist-") && !m.id.startsWith("error-")
+    );
+    const allHistory = msgs.map((m) => ({
+      role: "assistant" as const,
+      speaker: m.speaker ?? null,
+      content: m.content,
+    }));
+    const ptKeys = Object.keys(parallelTextsRef.current)
+      .map(Number)
+      .filter((t) => t < turnIndex)
+      .sort((a, b) => a - b);
+    for (const t of ptKeys) {
+      const pt = parallelTextsRef.current[t];
+      if (!pt?.content) continue;
+      if (allHistory.some((h) => h.speaker === pt.speaker && h.content === pt.content)) continue;
+      // Turn yang teksnya udah final tapi belum commit (audio masih muter)
+      // HARUS masuk history biar model punya konteks penuh.
+      allHistory.push({ role: "assistant", speaker: pt.speaker, content: pt.content });
+    }
+    // Window terbatas: model cuma butuh beberapa ronde terakhir. Prompt pendek
+    // = prefill cepat = transisi antar-turn lebih mulus.
+    const history = allHistory.slice(-PODCAST_HISTORY_LIMIT);
+    const firstUser = podcastMessagesRef.current.find(
+      (m) => m.role === "user" && !m.id.startsWith("temp-")
+    );
+    const topic = podcastTopicRef.current || (firstUser ? firstUser.content : "");
+    const note = podcastPendingNotesRef.current.join("\n");
+    podcastPendingNotesRef.current = [];
+
+    // UI: bubble paling bawah nempel ke streaming (bubble streaming DOBEL
+    // diperedam lewat gating di bawah).
+    let streamBubbleId: string | null = null;
+    if (stick || turnIndex === turnsCommittedRef.current) {
+      if (turnIndex >= turnsCommittedRef.current) {
+        turnsCommittedRef.current = turnIndex + 1;
+        setPodcastTurnCount(turnIndex + 1);
+        // JANGAN set podcastActiveSpeaker di sini — itu bakal nge-trigger
+        // indikator "sedang bicara" padahal AI masih mikir (generating).
+        // Speaker aktif di-set di podcastNextTurn saat chunk audio pertama diputar.
+      }
+      streamBubbleId = tempId;
+      setPodcastStreamingId(tempId);
+      // Set loading indicator: AI lagi generate teks untuk speaker ini
+      setPodcastLoadingId(tempId);
+      setMessages((prev) => [
+        ...prev,
+        { id: tempId, role: "assistant", speaker, content: "", attachments: [] },
+      ]);
+    }
+
+    const abort = new AbortController();
+    podcastTurnAbortRef.current = abort; // abort terbaru — stop/cleanup
+
+    let fullText = "";
+    let modelName: string | null = null;
+
+    // Ordered push: request TTS paralel, tapi penayangan ke channel dijaga
+    // urutan kalimat via chain. Chunk gagal TTS di-skip (kind=failed) supaya
+    // kalimat berikutnya tetap diputar — BUKAN menghentikan turn.
+    let pushChain: Promise<void> = Promise.resolve();
+    const pushOrdered = (p: Promise<string | null>) => {
+      const itemP = p.then((url): ChannelItem => (url ? { kind: "chunk", url } : { kind: "failed" }));
+      const itemPromise = itemP.catch((): ChannelItem => ({ kind: "failed" }));
+      pushChain = pushChain.then(() => itemPromise).then((item) => { channelPush(turnIndex, item); });
+    };
+
+    (async () => {
+      let sentenceBuffer = "";
+      try {
+        const res = await fetch("/api/podcast/turn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abort.signal,
+          body: JSON.stringify({
+            sessionId,
+            speaker,
+            topic,
+            history,
+            note: note || undefined,
+            names: podcastConfigRef.current.names,
+          }),
+        });
+      modelName = res.headers.get("x-llm-model");
+      if (!res.body) throw new Error("No response body");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        fullText += chunk;
+        sentenceBuffer += chunk;
+
+          let match: RegExpMatchArray | null;
+          while ((match = sentenceBuffer.match(SENTENCE_RE)) !== null) {
+            const idx = match.index! + match[0].length;
+            const sentence = sentenceBuffer.slice(0, idx).trim();
+            sentenceBuffer = sentenceBuffer.slice(idx);
+            if (!sentence) continue;
+            // Skip TTS kalau kalimatnya jelas echo instruksi (model lemah
+            // kadang nulis ulang system prompt sebagai "ucapan").
+            if (isInstructionEcho(sentence)) continue;
+            pushOrdered(fetchTtsChunk(sentence, speaker, abort.signal));
+          }
+
+          if (streamBubbleId) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamBubbleId
+                  ? { ...m, content: cleanTurnText(fullText) }
+                  : m
+              )
+            );
+          }
+        }
+      decoder.decode();
+
+        const remaining = sentenceBuffer.trim();
+        if (remaining && !isInstructionEcho(remaining)) {
+          pushOrdered(fetchTtsChunk(remaining, speaker, abort.signal));
+        }
+
+        // Teks final di-clean dari echo instruksi sebelum dipakai display/simpan.
+        parallelTextsRef.current[turnIndex] = {
+          speaker,
+          content: cleanTurnText(fullText),
+        };
+
+        // Lookahead trigger #2: teks turn ini udah final → langsung spawn turn
+        // berikutnya, biar generate-nya overlap sama TTS + playback turn ini
+        // (konteks turn ini juga udah masuk ke history-nya). Guard di helper
+        // cegah dobel spawn — trigger #1 (chunk audio pertama diputar) bisa
+        // aja udah duluan manggil.
+        ensureNextTurnSpawnedRef.current?.(turnIndex);
+
+        // End marker di-push SETELAH semua chunk chain selesai → nggak mendahului.
+        void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+      } catch (err) {
+        if (abort.signal.aborted) {
+          if (streamBubbleId) {
+            setMessages((prev) => prev.filter((m) => m.id !== streamBubbleId));
+            setPodcastStreamingId(null);
+          }
+          void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+          return;
+        }
+        console.error("podcast turn error:", err);
+        fullText += `\n\n_❌ ${err instanceof Error ? err.message : String(err)}_`;
+        parallelTextsRef.current[turnIndex] = { speaker, content: fullText };
+        if (streamBubbleId) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === streamBubbleId ? { ...m, content: fullText } : m))
+          );
+        }
+        void pushChain.then(() => { channelPush(turnIndex, { kind: "end" }); });
+      }
+    })();
+
+    // Daftarkan ke registry — player loop cukup ngeliat ini, tanpa spawn ulang.
+    spawnedTurnsRef.current[turnIndex] = {
+      turnIndex, speaker, tempId, isTopBubble: !!streamBubbleId, abort,
+      finalize: () => finalize(),
+    };
+
+    const finalize = async (): Promise<Message | null> => {
+      if (!parallelTextsRef.current[turnIndex]) return null; // belum selesai / abort
+      const content = parallelTextsRef.current[turnIndex].content?.trim();
+      // Jika konten kosong setelah clean (semua di-filter sebagai echo instruksi),
+      // jangan save ke DB — return null biar loop lanjut tanpa stop.
+      if (!content) {
+        console.warn(`[Podcast] Turn ${turnIndex} (${speaker}): empty content after clean, skipping persist`);
+        return null;
+      }
+      const saved = await saveMessage(sessionId, "assistant", content, modelName ?? undefined, null, null, speaker);
+      if (saved) {
+        setMessages((prev) => {
+          const exists = prev.some((m) => m.id === streamBubbleId);
+          if (exists && streamBubbleId) {
+            return prev.map((m) => (m.id === streamBubbleId ? saved : m));
+          }
+          if (prev.some((m) => m.id === saved.id)) return prev;
+          return [...prev, saved];
+        });
+      }
+      return saved;
+    };
+
+    // Kembalikan entry registry yang sudah didaftarkan di atas.
+    return spawnedTurnsRef.current[turnIndex];
+  }, [fetchTtsChunk, channelPush, saveMessage]);
+
+  const podcastNextTurn = useCallback(async () => {
+    const sessionId = podcastSessionIdRef.current;
+    if (!sessionId) return;
+    if (podcastStateRef.current.status !== "running") return;
+
+    // Lookahead: spawn turn berikutnya secepat mungkin. Dua trigger:
+    //  #1 chunk audio pertama turn ini mulai diputar (di loop bawah),
+    //  #2 teks turn ini SELESAI di-generate (di spawnTurn) — overlap lebih
+    //    besar buat model yang lambat, dan konteks turn ini udah masuk.
+    // Guard `spawnedTurnsRef` bikin trigger mana pun yang duluan yang jalan.
+    ensureNextTurnSpawnedRef.current = (afterTurn: number) => {
+      const nextTurn = afterTurn + 1;
+      if (podcastStateRef.current.status !== "running") return;
+      if (nextTurn >= podcastConfigRef.current.maxTurns) return;
+      if (spawnedTurnsRef.current[nextTurn]) return;
+      spawnCursorRef.current = Math.max(spawnCursorRef.current, nextTurn);
+      spawnTurn(nextTurn, false);
+    };
+
+    let turn = spawnCursorRef.current;
+
+    while (true) {
+      const s = podcastStateRef.current.status;
+      if (s !== "running") return;
+      if (turn >= podcastConfigRef.current.maxTurns) {
+        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+        setPodcastStatus("stopped");
+        setPodcastActiveSpeaker(null);
+        resetPodcastPipeline();
+        return;
+      }
+
+      // Spawn turn ini kalau belum — stick=true → bubble streaming-nempel.
+      let spawned: SpawnedTurn | undefined = spawnedTurnsRef.current[turn];
+      if (!spawned) {
+        spawned = spawnTurn(turn, true) || undefined;
+        if (!spawned) return;
+      }
+
+      if (spawned.isTopBubble) setPodcastStreamingId(null);
+
+      // Play tiap chunk audio turn ini begitu siap.
+      let hasTriggeredNextSpawn = false;
+      let firstChunkPlayed = false;
+      while (true) {
+        const chunk = await channelTake(turn);
+        if (chunk.turn !== turn) return; // batal / cleanup
+        if (chunk.item.kind === "end") break; // audio turn ini habis
+
+        if (chunk.item.kind === "failed") continue; // skip kalimat gagal
+
+        const s2 = podcastStateRef.current.status;
+        if (s2 !== "running") { URL.revokeObjectURL(chunk.item.url); continue; }
+
+        // First chunk: clear loading, set active speaker, start playing
+        if (!firstChunkPlayed) {
+          firstChunkPlayed = true;
+          setPodcastLoadingId(null);
+          setPodcastActiveSpeaker(spawned.speaker);
+        }
+        setPodcastPlayingId(spawned.tempId);
+
+        // SAAT TURN N MULAI MEMUTAR AUDIO: Trigger generate Turn N+1 di background!
+        // Trigger #1 dari dua trigger lookahead (yang lain: teks final di spawnTurn).
+        if (!hasTriggeredNextSpawn) {
+          hasTriggeredNextSpawn = true;
+          ensureNextTurnSpawnedRef.current?.(turn);
+        }
+
+        await playPodcastAudio(chunk.item.url);
+      }
+      setPodcastPlayingId(null);
+      setPodcastActiveSpeaker(null);
+
+      // Jaga-jaga kalau turn ini tidak punya chunk audio sama sekali
+      if (!hasTriggeredNextSpawn) {
+        ensureNextTurnSpawnedRef.current?.(turn);
+      }
+
+      // Teks final — confirm + persist. Kalau error → stop.
+      const finalText = parallelTextsRef.current[turn]?.content ?? "";
+      if (finalText.includes("_❌")) {
+        podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+        setPodcastStatus("stopped");
+        setPodcastActiveSpeaker(null);
+        resetPodcastPipeline();
+        return;
+      }
+      const saved = await spawned.finalize();
+      // finalize return null jika content kosong (di-filter semua echo instruksi).
+      // Jangan stop, lanjut ke turn berikutnya.
+      if (!saved) {
+        console.log(`[Podcast] Turn ${turn} skipped (empty after clean), continuing...`);
+      }
+
+      turn += 1;
+
+      if (podcastStateRef.current.status !== "running") return;
+    }
+  }, [saveMessage, playPodcastAudio, resetPodcastPipeline, channelPush, channelTake, spawnTurn]);
+  useEffect(() => {
+    podcastNextTurnRef.current = podcastNextTurn;
+  }, [podcastNextTurn]);
+
+  // Mulai podcast baru: bikin session mode podcast + simpan topik, lalu jalankan loop.
+  const handleStartPodcast = useCallback(
+    async (topic: string, config: PodcastConfig) => {
+      const trimmed = topic.trim();
+      if (!trimmed) return;
+      podcastStopRequestedRef.current = false;
+      podcastConfigRef.current = config;
+      setPodcastConfig(config);
+      resetPodcastPipeline();
+      turnsCommittedRef.current = 0;
+      spawnCursorRef.current = 0;
+      podcastTopicRef.current = trimmed;
+
+      try {
+        let session: Session;
+        const currentSession = sessions.find((s) => s.id === activeSessionId);
+        const isCurrentEmpty = messages.length === 0;
+
+        if (currentSession && isCurrentEmpty) {
+          // Reuse active empty session instead of creating a duplicate session
+          const res = await fetch(`/api/sessions/${activeSessionId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmed.slice(0, 40),
+              mode: "podcast",
+              podcastConfig: JSON.stringify(config),
+            }),
+          });
+          if (!res.ok) throw new Error("Failed to update podcast session");
+          session = await res.json();
+          setSessions((prev) =>
+            prev.map((s) => (s.id === session.id ? session : s))
+          );
+        } else {
+          // Create new podcast session
+          const res = await fetch("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmed.slice(0, 40),
+              mode: "podcast",
+              podcastConfig: JSON.stringify(config),
+            }),
+          });
+          if (!res.ok) throw new Error("Failed to create podcast session");
+          session = await res.json();
+          setSessions((prev) => [session, ...prev]);
+        }
+
+        setActiveSessionId(session.id);
+        podcastSessionIdRef.current = session.id;
+
+        setMessages([]);
+        podcastMessagesRef.current = [];
+
+        const saved = await saveMessage(session.id, "user", trimmed);
+        if (saved) {
+          setMessages([saved]);
+          podcastMessagesRef.current = [saved];
+        }
+
+        podcastStateRef.current = {
+          status: "running",
+          turnCount: 0,
+          config,
+        };
+        setPodcastStatus("running");
+        setPodcastTurnCount(0);
+        await podcastNextTurn();
+      } catch (err) {
+        console.error("handleStartPodcast error:", err);
+      }
+    },
+    [activeSessionId, messages.length, saveMessage, podcastNextTurn, resetPodcastPipeline, sessions]
+  );
+
+  // Lanjutkan sesi podcast yang udah ada (dari history).
+  
+  // Lanjut dari bubble tertentu: baca bubble yang diklik + bubble-bubble di
+  // bawahnya yang belum pernah diputar, baru setelah habis → generate giliran
+  // baru. NGGAK truncate — kelanjutan yang udah ada tetep dibaca dulu.
+  // Prefetch audio pesan BERIKUTNYA selama pesan sekarang diputar (seamless).
+  // Putar ulang semua turn on-air dari transkrip — prefetch pesan BERIKUTNYA
+  // selama pesan sekarang diputar, jadi transisi antar-bubble seamless.
+  const handleReplayPodcast = useCallback(async () => {
+    const turns = podcastMessagesRef.current.filter(
+      (m) =>
+        m.role === "assistant" &&
+        m.speaker &&
+        !m.id.startsWith("temp-") &&
+        !m.id.startsWith("assist-") &&
+        !m.id.startsWith("error-")
+    );
+    podcastStopRequestedRef.current = false;
+    setPodcastReplaying(true);
+    try {
+      let nextPrefetch: Promise<string | null> | null =
+        turns.length > 1 ? prefetchMessageAudio(turns[1]) : null;
+
+      for (let i = 0; i < turns.length; i++) {
+        if (podcastStopRequestedRef.current) break;
+        const msg = turns[i];
+        const speaker = (msg.speaker as Speaker) ?? "host";
+
+        const currentPrefetch =
+          i === 0
+            ? prefetchMessageAudio(msg) // pertama: langsung fetch sendiri
+            : (nextPrefetch ?? prefetchMessageAudio(msg)); // lainnya: prefetch sudah jalan
+
+        setPodcastLoadingId(msg.id);
+
+        // Selama menunggu bubble ini siap, mulai prefetch bubble BERIKUTNYA.
+        if (i + 1 < turns.length) {
+          nextPrefetch = prefetchMessageAudio(turns[i + 1]);
+        } else {
+          nextPrefetch = null;
+        }
+
+        const url = await currentPrefetch;
+        setPodcastLoadingId(null);
+        if (!url) {
+          console.warn("[Podcast] replay: audio null", msg.id);
+          continue;
+        }
+        setPodcastActiveSpeaker(speaker);
+        setPodcastPlayingId(msg.id);
+        await playPodcastAudio(url);
+        setPodcastPlayingId(null);
+        setPodcastActiveSpeaker(null);
+      }
+    } finally {
+      setPodcastReplaying(false);
+    }
+  }, [playPodcastAudio, prefetchMessageAudio]);
+
+  const handleStopPodcast = useCallback(() => {
+    podcastStopRequestedRef.current = true;
+    podcastStateRef.current = { ...podcastStateRef.current, status: "stopped" };
+    setPodcastStatus("stopped");
+    podcastTurnAbortRef.current?.abort();
+    podcastAudioRef.current?.pause();
+    podcastAudioResolveRef.current?.(false);
+    podcastAudioResolveRef.current = null;
+    const pending = pendingAudioRef.current;
+    if (pending) {
+      pending.resolve(false);
+      pendingAudioRef.current = null;
+    }
+    setPodcastNeedsGesture(false);
+    setPodcastStreamingId(null);
+    setPodcastPlayingId(null);
+    setPodcastLoadingId(null);
+    resetPodcastPipeline();
+  }, [resetPodcastPipeline]);
+
+  // Interjeksi (prompter note) — di-persist sebagai pesan user (off-air),
+  // lalu dikirim ke giliran berikutnya sebagai note produser.
+  const handlePodcastNote = useCallback(async () => {
+    const trimmed = podcastNoteInput.trim();
+    const sessionId = podcastSessionIdRef.current;
+    if (!trimmed || !sessionId) return;
+    setPodcastNoteInput("");
+    const saved = await saveMessage(sessionId, "user", trimmed);
+    if (saved) {
+      podcastPendingNotesRef.current.push(saved.content);
+      setMessages((prev) => [...prev, saved]);
+    }
+  }, [podcastNoteInput, saveMessage]);
+
+  // Pastikan loading indicator gak nyangkut kalo stop/pause dipanggil pas
+  // audio lagi di-fetch (mis. user klik stop pas strip loading masih tampil).
 
   // ─── Regenerate response ──────────────────────────────────
   const handleRegenerate = useCallback(async () => {
@@ -1095,10 +1887,13 @@ export default function Home() {
     designerPages.length > 0 ||
     messages.some((m) => m.role === "assistant" && m.content.includes("```html"));
 
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const isPodcastSession = activeSession?.mode === "podcast";
+
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-900">
-      {/* Sidebar cuma di chat mode — designer auto fullscreen */}
-      {viewMode === "chat" && (
+      {/* Sidebar di chat & podcast mode — designer auto fullscreen */}
+      {viewMode !== "designer" && (
         <Sidebar
           sessions={sessions}
           activeSessionId={activeSessionId}
@@ -1111,8 +1906,7 @@ export default function Home() {
       )}
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* View toggle: Chat | Designer — cuma muncul kalau ada UI yang ke-generate */}
-        {hasGeneratedUI && (
+        {/* View toggle: Chat | Podcast | Designer */}
         <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
           <button
             onClick={() => setViewMode("chat")}
@@ -1126,6 +1920,18 @@ export default function Home() {
             Chat
           </button>
           <button
+            onClick={() => setViewMode("podcast")}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              viewMode === "podcast"
+                ? "bg-indigo-600 text-white"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+            }`}
+          >
+            <Mic size={14} />
+            Podcast
+          </button>
+          {hasGeneratedUI && (
+          <button
             onClick={() => setViewMode("designer")}
             className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
               viewMode === "designer"
@@ -1136,8 +1942,8 @@ export default function Home() {
             <LayoutDashboard size={14} />
             Designer
           </button>
+          )}
         </div>
-        )}
 
         {viewMode === "chat" ? (
           <>
@@ -1167,6 +1973,30 @@ export default function Home() {
               onClearReply={() => setReplyTarget(null)}
             />
           </>
+        ) : viewMode === "podcast" ? (
+          <PodcastArea
+            isPodcastSession={isPodcastSession}
+            sessionTitle={activeSession?.title}
+            messages={messages}
+            podcastConfig={podcastConfig}
+            podcastStatus={podcastStatus}
+            podcastTurnCount={podcastTurnCount}
+            podcastActiveSpeaker={podcastActiveSpeaker}
+            podcastStreamingId={podcastStreamingId}
+            podcastPlayingId={podcastPlayingId}
+            podcastLoadingId={podcastLoadingId}
+            podcastNeedsGesture={podcastNeedsGesture}
+            podcastNoteInput={podcastNoteInput}
+            podcastReplaying={podcastReplaying}
+            isAudioPaused={isAudioPaused}
+            onTogglePausePlay={togglePausePlayAudio}
+            onNoteInputChange={setPodcastNoteInput}
+            onSendNote={handlePodcastNote}
+            onStart={handleStartPodcast}
+            onReplay={handleReplayPodcast}
+            onStop={handleStopPodcast}
+            onResumeGesture={resumePodcastAudio}
+          />
         ) : (
           <>
             <DesignerCanvas
