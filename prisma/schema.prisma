@@ -14,11 +14,15 @@ model Session {
   designStyle    String?         // NeedMCP style slug yang di-lock (e.g. "modern")
   mode           String          @default("chat") // "chat" | "designer" | "podcast"
   podcastConfig  String?         // JSON: { speakerNames, voices, maxTurns } buat resume podcast
+  discoveryId    String?         // Curiosity Engine: chat terikat konteks discovery aktif (§10 PRD)
+  discovery      Discovery?      @relation(fields: [discoveryId], references: [id], onDelete: SetNull)
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   messages       Message[]
   attachments    Attachment[]
   designerPages  DesignerPage[]
+
+  @@index([discoveryId])
 }
 
 model Message {
@@ -88,4 +92,203 @@ model DesignerPage {
   updatedAt DateTime @updatedAt
 
   @@index([sessionId])
+}
+
+// ============================================================
+// CURIOSITY ENGINE — AI-powered discovery experience
+// PRD: "Learn something you didn't know you wanted to know."
+// ============================================================
+
+// §15 Exploration Graph — node topik; graph self-referencing (parent → children)
+model Topic {
+  id          String   @id @default(cuid())
+  slug        String   @unique // e.g. "dancing-plague-1518" — stable identifier
+  name        String   // e.g. "The Dancing Plague of 1518"
+  category    String   // §13: "history" | "science" | "technology" | "human-behavior" | "geography" | "culture" | "ancient-civilizations" | "space" | "engineering" | "language" | "economics" | "philosophy" | "nature" | "art" | "unexpected-connections"
+  summary     String?  // ringkasan singkat topik (buat graph traversal & dedup)
+  keywords    String?  // comma-separated keywords buat similarity/anti-repetition
+  parentId    String?  // graph edge: topik induk (e.g. "Medieval Europe" → "Dancing Plague")
+  parent      Topic?   @relation("TopicGraph", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Topic[]  @relation("TopicGraph")
+  discoveries Discovery[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@index([parentId])
+}
+
+// §6 Discovery Card + §7 Quality Model — satu kandidat discovery
+model Discovery {
+  id          String   @id @default(cuid())
+  topicId     String?
+  topic       Topic?   @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  category    String   // §13: "history" | "science" | "technology" | ... (denormalisasi dari Topic)
+  // --- Konten kartu (§6) ---
+  hook        String   // headline pembuka: "In 1518, hundreds of people danced for days."
+  teaser      String   // 2-3 kalimat penggugah: "Di Strasbourg, ratusan orang dilaporkan menari..."
+  question    String   // pemicu curiosity: "Why did this happen?"
+  // --- Quality scores (§7) — masing-masing 0.0–1.0, dinilai AI saat generation ---
+  surprise        Float    @default(0) // seberapa tidak terduga
+  curiosity       Float    @default(0) // seberapa kuat memunculkan pertanyaan lanjutan
+  credibility     Float    @default(0) // kualitas & jumlah sumber pendukung
+  depthPotential  Float    @default(0) // berapa banyak konsep yang bisa dieksplorasi
+  discoveryScore  Float    @default(0) // composite: surprise × curiosity × credibility × depthPotential (personal novelty dihitung saat ranking)
+  // --- Curation pipeline (§20) ---
+  status      String   @default("candidate") // "candidate" | "verified" | "approved" | "rejected" | "archived"
+  rejectReason String? // alasan reject (fact-check gagal, duplikat, dll)
+  // --- Relasi ---
+  levels      DiscoveryLevel[]
+  sources     DiscoverySource[]
+  questions   RabbitHoleQuestion[]
+  deliveries  DiscoveryDelivery[]
+  saves       SavedDiscovery[]
+  sessions    Session[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([topicId])
+  @@index([discoveryScore])
+}
+
+// §9 Curiosity Depth — konten per level (L0 Hook → L4 Deep Dive)
+model DiscoveryLevel {
+  id          String    @id @default(cuid())
+  discoveryId String
+  discovery   Discovery @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  level       Int       // 0=Hook, 1=Context, 2=Why, 3=Connections, 4=Deep Dive
+  title       String    // judul section level ini
+  content     String    // konten markdown
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([discoveryId, level]) // idempoten: regenerate gak dobel-insert
+}
+
+// §16 Sources & Trust — sumber referensi
+model Source {
+  id          String   @id @default(cuid())
+  title       String   // judul sumber
+  url         String?  // link (kalau ada)
+  author      String?
+  publishedAt DateTime? // tanggal publikasi sumber
+  type        String   // "article" | "book" | "paper" | "archive" | "interview" | "other"
+  trustLevel  String   @default("medium") // "high" | "medium" | "low"
+  notes       String?  // konteks tambahan tentang sumber ini
+  claims      DiscoverySource[] // back-relation ke join table
+  createdAt   DateTime @default(now())
+
+  @@index([trustLevel])
+}
+
+// Join table Discovery ↔ Source + status klaim (§16)
+model DiscoverySource {
+  id          String    @id @default(cuid())
+  discoveryId String
+  discovery   Discovery @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  sourceId    String
+  source      Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  claimStatus String    @default("known_fact") // §16: "known_fact" | "interpretation" | "disputed"
+  confidence  Float     @default(0.8) // 0.0–1.0 tingkat kepercayaan klaim dari sumber ini
+  note        String?   // catatan disagreement antar sumber (kalau ada)
+  createdAt   DateTime  @default(now())
+
+  @@unique([discoveryId, sourceId])
+  @@index([sourceId])
+}
+
+// §8 Rabbit Hole — pertanyaan lanjutan branching
+model RabbitHoleQuestion {
+  id          String    @id @default(cuid())
+  discoveryId String
+  discovery   Discovery @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  parentId    String?   // pertanyaan sebelumnya di chain ini (branching path)
+  parent      RabbitHoleQuestion?  @relation("QuestionChain", fields: [parentId], references: [id], onDelete: Cascade)
+  children    RabbitHoleQuestion[] @relation("QuestionChain")
+  question    String    // "Why did people dance?"
+  answer      String?   // jawaban AI (markdown), diisi saat user explore
+  order       Int       @default(0) // urutan dalam satu level branching
+  createdAt   DateTime  @default(now())
+
+  @@index([discoveryId])
+  @@index([parentId])
+}
+
+// §11 + §22 Personal Discovery — profil learner (singleton per app, MVP tanpa auth)
+model LearnerProfile {
+  id              String   @id @default("default")
+  depthPreference String   @default("2-3") // §22: level kedalaman yang biasa dipilih, e.g. "0-1" | "2-3" | "4"
+  summary         String?  // ringkasan AI: "User sudah mengetahui dasar sejarah WWII..."
+  updatedAt       DateTime @updatedAt
+  knowledge       KnowledgeTag[]
+  interests       InterestTag[]
+  deliveries      DiscoveryDelivery[]
+}
+
+// §22 Known — apa yang sudah user ketahui (buat personal novelty)
+model KnowledgeTag {
+  id        String         @id @default(cuid())
+  profileId String
+  profile   LearnerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  tag       String         // e.g. "wwii-basics", "roman-empire-basics"
+  level     String         @default("basic") // "basic" | "intermediate" | "advanced"
+  createdAt DateTime       @default(now())
+
+  @@unique([profileId, tag])
+}
+
+// §22 Curious about / Avoid — preferensi topik
+model InterestTag {
+  id        String         @id @default(cuid())
+  profileId String
+  profile   LearnerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  tag       String         // e.g. "obscure-history", "engineering"
+  type      String         // "curious" | "avoid"
+  weight    Float          @default(1.0) // bobot interest (naik tiap explore, turun tiap skip)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@unique([profileId, tag, type])
+}
+
+// §12 Anti-Repetition + history — ledger discovery yang sudah dikirim ke user
+model DiscoveryDelivery {
+  id          String         @id @default(cuid())
+  profileId   String
+  profile     LearnerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  discoveryId String
+  discovery   Discovery      @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  deliveredAt DateTime       @default(now())
+  maxDepth    Int            @default(0) // depth terjauh yang dicapai user (0-4)
+  outcome     String         @default("viewed") // "viewed" | "explored" | "deep_dived" | "skipped" | "saved"
+  events      DiscoveryEvent[]
+
+  @@unique([profileId, discoveryId]) // anti-repetition: satu discovery cuma dikirim sekali
+  @@index([profileId, deliveredAt])
+}
+
+// §23 Key Product Metrics — event funnel per delivery
+model DiscoveryEvent {
+  id         String            @id @default(cuid())
+  deliveryId String
+  delivery   DiscoveryDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  type       String            // "viewed" | "explore_clicked" | "question_asked" | "level_reached" | "deep_dive" | "saved" | "didnt_know" | "already_knew" | "stopped"
+  level      Int?              // level yang dicapai (buat "level_reached")
+  metadata   String?           // JSON string: data tambahan (e.g. question text)
+  createdAt  DateTime          @default(now())
+
+  @@index([deliveryId])
+  @@index([type])
+}
+
+// §19 MVP #9 — Save topic for later
+model SavedDiscovery {
+  id          String    @id @default(cuid())
+  discoveryId String
+  discovery   Discovery @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  note        String?   // catatan user (optional)
+  createdAt   DateTime  @default(now())
+
+  @@unique([discoveryId]) // satu discovery cuma bisa di-save sekali (MVP tanpa multi-user)
 }

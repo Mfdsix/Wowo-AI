@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard } from "lucide-react";
+import Link from "next/link";
+import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard, Compass, Sparkles } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
@@ -203,14 +204,37 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   // State: session dipilih tapi belum ada pesan
   if (messages.length === 0 && !isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-zinc-900">
-        <div className="text-center">
-          <Bot size={48} className="mx-auto mb-4 text-zinc-600" />
+      <div className="flex-1 flex items-center justify-center bg-zinc-900 px-4">
+        <div className="text-center w-full max-w-md">
+          {/* Highlighted Curiosity Engine CTA — persuasive redirect */}
+          <Link
+            href="/curiosity"
+            className="group block mb-7 rounded-2xl border border-amber-500/50 bg-gradient-to-br from-amber-500/20 via-amber-500/5 to-zinc-900 p-5 text-left transition-all hover:border-amber-400 hover:from-amber-500/30 hover:shadow-lg hover:shadow-amber-500/10"
+          >
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-amber-500/20 p-2.5 ring-1 ring-amber-400/40">
+                <Compass size={26} className="text-amber-300" />
+              </div>
+              <div className="flex-1">
+                <p className="flex items-center gap-1.5 text-base font-semibold text-amber-200">
+                  <Sparkles size={15} /> Belum menemukan yang kamu cari?
+                </p>
+                <p className="text-[13px] text-zinc-300 mt-1">
+                  Biarkan rasa penasaran yang menemukannya.{" "}
+                  <span className="font-semibold text-amber-300 underline-offset-2 group-hover:underline">
+                    Coba Curiosity Engine →
+                  </span>
+                </p>
+              </div>
+            </div>
+          </Link>
+
+          <Bot size={40} className="mx-auto mb-3 text-zinc-600" />
           <h2 className="text-xl font-semibold text-zinc-300 mb-2">
-            Start chatting
+            Mulai mengobrol
           </h2>
           <p className="text-zinc-500 text-sm">
-            Send a message to begin your conversation
+            Kirim pesan untuk memulai percakapan
           </p>
         </div>
       </div>
