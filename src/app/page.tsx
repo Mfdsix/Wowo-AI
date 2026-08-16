@@ -6,6 +6,8 @@ import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput, { type PendingFile } from "@/components/MessageInput";
 import type { Message, ReplyTarget, AttachmentMeta, RetrievalSource } from "@/lib/types";
+import AuthModal from "@/components/AuthModal";
+import AdminPanel from "@/components/AdminPanel";
 import DesignerCanvas from "@/components/DesignerCanvas";
 import DesignerPrompt from "@/components/DesignerPrompt";
 import PodcastArea from "@/components/PodcastArea";
@@ -27,6 +29,7 @@ type Session = {
   designStyle?: string | null;
   mode?: string;
   podcastConfig?: string | null;
+  ownerCode?: string | null;
   createdAt: string;
   updatedAt: string;
   _count: { messages: number };
@@ -122,6 +125,14 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
+
+  // ─── Auth (6-digit session code) ─────────────────────────────
+  // `code` null = belum punya sesi → modal unlock muncul (uncoseable).
+  // `isAdmin` = kode super admin (78900) → bisa buka panel admin.
+  const [code, setCode] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [viewMode, setViewMode] = useState<"chat" | "designer" | "podcast">("chat");
@@ -172,16 +183,74 @@ export default function Home() {
   useEffect(() => { podcastSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
   // ─── Fetch all sessions ────────────────────────────────────
+  // Response baru: { sessions, code, isAdmin }. Kita sync state auth juga
+  // biar UI (indikator user / tombol admin) selalu nunjukin kode yg benar.
   const fetchSessions = useCallback(async () => {
     try {
       const res = await fetch("/api/sessions");
       if (!res.ok) throw new Error("Failed to fetch sessions");
-      const data: Session[] = await res.json();
-      setSessions(data);
-      return data;
+      const payload = (await res.json()) as {
+        sessions: Session[];
+        code: string | null;
+        isAdmin: boolean;
+      };
+      setSessions(payload.sessions);
+      if (payload.code) {
+        setCode(payload.code);
+        setIsAdmin(payload.isAdmin);
+      }
+      return payload.sessions;
     } catch (err) {
       console.error("fetchSessions error:", err);
       return [];
+    }
+  }, []);
+
+  // ─── Auth handlers ──────────────────────────────────────────
+  // Pakai ref buat fetchSessions/fetchMessages biar handler ini bisa didefinisikan
+  // SEBELUM kedua fungsi tsb deklarasikan (hindari "used before declaration").
+  const fetchSessionsRef = useRef<() => Promise<Session[]>>(async () => []);
+  const fetchMessagesRef = useRef<(id: string) => Promise<void>>(async () => {});
+  fetchSessionsRef.current = fetchSessions;
+
+  const handleAuthenticated = useCallback(async (newCode: string, admin: boolean) => {
+    setCode(newCode);
+    setIsAdmin(admin);
+    setShowAuthModal(false);
+    setIsSessionsLoading(true);
+    const data = await fetchSessionsRef.current();
+    if (data.length > 0) {
+      setActiveSessionId(data[0].id);
+      await fetchMessagesRef.current(data[0].id);
+    } else {
+      setActiveSessionId(null);
+      setMessages([]);
+    }
+    setIsSessionsLoading(false);
+  }, []);
+
+  // Logout → hapus cookie, reset state, balik ke modal unlock.
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch("/api/auth", { method: "DELETE" });
+    } catch { /* noop */ }
+    setCode(null);
+    setIsAdmin(false);
+    setSessions([]);
+    setActiveSessionId(null);
+    setMessages([]);
+    setShowAdminPanel(false);
+    setShowAuthModal(true);
+  }, []);
+
+  // Admin impersonate → server udah set cookie ke ownerCode session tsb,
+  // kita tinggal reload sesi & tutup panel.
+  const handleImpersonate = useCallback(async (sessionId: string) => {
+    setShowAdminPanel(false);
+    const data = await fetchSessionsRef.current();
+    if (data.find((s) => s.id === sessionId)) {
+      setActiveSessionId(sessionId);
+      await fetchMessagesRef.current(sessionId);
     }
   }, []);
 
@@ -198,6 +267,9 @@ export default function Home() {
       console.error("fetchMessages error:", err);
     }
   }, []);
+
+  // Sync ref handler → fungsi asli (di-assign setelah dideklarasikan).
+  fetchMessagesRef.current = fetchMessages;
 
   // Refetch buat UI poll progress index attachment (ChatArea).
   const refreshMessages = useCallback(() => {
@@ -269,39 +341,31 @@ export default function Home() {
     [updateSessionTitle]
   );
 
-  // ─── Init: load sessions, auto-create if empty ──────────────
+  // ─── Init: cek cookie → kalau belum punya kode, tampilkan modal unlock.
+  // Kalau udah punya kode (di cookie), langsung load sesi miliknya.
+  // (Pembuatan sesi pertama dilakukan di server saat auth, jadi gak perlu
+  // auto-create di sini.)
   useEffect(() => {
     (async () => {
       setIsSessionsLoading(true);
+      // fetchSessions juga sync state `code`/`isAdmin` dari response.
       const data = await fetchSessions();
-      let sessions = data;
 
-      // Auto-create first session if empty
-      if (sessions.length === 0) {
-        try {
-          const res = await fetch("/api/sessions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: "New Chat" }),
-          });
-          if (res.ok) {
-            const newSession: Session = await res.json();
-            sessions = [newSession];
-            setSessions(sessions);
-          }
-        } catch (err) {
-          console.error("Auto-create session error:", err);
-        }
+      if (!code) {
+        // Gak ada kode valid di cookie → paksa modal unlock (uncoseable).
+        setShowAuthModal(true);
+        setIsSessionsLoading(false);
+        return;
       }
 
-      // Select first session
-      if (sessions.length > 0) {
-        setActiveSessionId(sessions[0].id);
-        await fetchMessages(sessions[0].id);
+      if (data.length > 0) {
+        setActiveSessionId(data[0].id);
+        await fetchMessages(data[0].id);
       }
       setIsSessionsLoading(false);
     })();
-  }, [fetchSessions, fetchMessages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ─── New session ────────────────────────────────────────────
   const handleNewSession = useCallback(async () => {
@@ -1906,6 +1970,32 @@ export default function Home() {
       )}
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* User / session bar — indikator kode akses + aksi admin/logout */}
+        {code && (
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-800 bg-zinc-950/60 px-3 py-1.5 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-[11px] text-zinc-500">Sesi:</span>
+              <span className="font-mono text-xs text-indigo-300 truncate">
+                {code === "789000" ? "SUPER ADMIN" : code}
+              </span>
+              {isAdmin && (
+                <button
+                  onClick={() => setShowAdminPanel(true)}
+                  className="rounded bg-amber-600/20 px-2 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-600/30"
+                >
+                  Panel Admin
+                </button>
+              )}
+            </div>
+            <button
+              onClick={() => void handleLogout()}
+              className="rounded px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              Logout
+            </button>
+          </div>
+        )}
+
         {/* View toggle: Chat | Podcast | Designer */}
         <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
           <button
@@ -2018,6 +2108,20 @@ export default function Home() {
             />
           </>
         )}
+
+      {/* Modal unlock (uncoseable) — wajib punya kode sebelum pakai app */}
+      {showAuthModal && !code && (
+        <AuthModal onAuthenticated={(c, a) => void handleAuthenticated(c, a)} />
+      )}
+
+      {/* Panel super admin — list semua sesi & login-as */}
+      {showAdminPanel && isAdmin && (
+        <AdminPanel
+          onClose={() => setShowAdminPanel(false)}
+          onImpersonate={(sid) => void handleImpersonate(sid)}
+        />
+      )}
+
       </main>
     </div>
   );

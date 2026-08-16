@@ -11,6 +11,10 @@ datasource db {
 model Session {
   id             String          @id @default(cuid())
   title          String          @default("New Chat")
+  // ─── User session isolation (6-digit access code) ─────────────
+  // Kode akses 6 karakter (huruf+angka). Session hanya bisa diakses
+  // oleh pemilik kodenya. Kosong/null = global (legacy/pre-auth data).
+  ownerCode      String?
   designStyle    String?         // NeedMCP style slug yang di-lock (e.g. "modern")
   mode           String          @default("chat") // "chat" | "designer" | "podcast"
   podcastConfig  String?         // JSON: { speakerNames, voices, maxTurns } buat resume podcast
@@ -23,6 +27,7 @@ model Session {
   designerPages  DesignerPage[]
 
   @@index([discoveryId])
+  @@index([ownerCode])
 }
 
 model Message {
@@ -224,6 +229,7 @@ model LearnerProfile {
   knowledge       KnowledgeTag[]
   interests       InterestTag[]
   deliveries      DiscoveryDelivery[]
+  saved           SavedDiscovery[]
 }
 
 // §22 Known — apa yang sudah user ketahui (buat personal novelty)
@@ -283,12 +289,17 @@ model DiscoveryEvent {
 }
 
 // §19 MVP #9 — Save topic for later
+// `profileId` = kode akses user (dijadikan id LearnerProfile). Satu discovery
+// bisa di-save per-user (bukan global) biar "simpan" bersifat privat.
 model SavedDiscovery {
-  id          String    @id @default(cuid())
+  id          String         @id @default(cuid())
   discoveryId String
-  discovery   Discovery @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  discovery   Discovery      @relation(fields: [discoveryId], references: [id], onDelete: Cascade)
+  profileId   String
+  profile     LearnerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
   note        String?   // catatan user (optional)
   createdAt   DateTime  @default(now())
 
-  @@unique([discoveryId]) // satu discovery cuma bisa di-save sekali (MVP tanpa multi-user)
+  @@unique([profileId, discoveryId]) // satu discovery cuma di-save sekali per user
+  @@index([profileId])
 }

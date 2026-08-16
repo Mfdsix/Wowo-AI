@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Sparkles,
   Compass,
@@ -22,6 +22,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import MarkdownLite from "@/components/MarkdownLite";
+import AuthModal from "@/components/AuthModal";
 
 // Suara TTS yang di-allowlist di /api/tts (id-ID). Gadis = wanita, Ardi = pria.
 const TTS_VOICE = "id-ID-GadisNeural";
@@ -187,6 +188,33 @@ export default function CuriosityPage() {
   const [askInput, setAskInput] = useState("");
   const [answers, setAnswers] = useState<{ q: string; a: string }[]>([]);
   const [asking, setAsking] = useState(false);
+
+  // ─── Auth: butuh kode akses (sama dengan chat) ──────────────
+  // Curiosity di-scope per-user (history & simpan), jadi halaman ini juga
+  // di-gate: kalau belum punya kode di cookie, tampilkan modal unlock.
+  const [code, setCode] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/sessions");
+        const data = (await res.json()) as { code: string | null };
+        if (data.code) {
+          setCode(data.code);
+        } else {
+          setShowAuthModal(true);
+        }
+      } catch {
+        setShowAuthModal(true);
+      }
+    })();
+  }, []);
+
+  const handleAuthenticated = (c: string) => {
+    setCode(c);
+    setShowAuthModal(false);
+  };
 
   const reset = () => {
     setDiscovery(null);
@@ -421,6 +449,7 @@ export default function CuriosityPage() {
   }, []);
 
   return (
+    <>
     <main className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center px-4 py-10">
       <div className="w-full max-w-xl flex items-center justify-between mb-8">
         <div className="flex items-center gap-2 text-zinc-300">
@@ -832,6 +861,12 @@ export default function CuriosityPage() {
         Tak dioptimalkan untuk waktu layar. Temukan hal menarik, pelajari, lalu jalani hidupmu.
       </p>
     </main>
+
+    {/* Modal unlock (uncoseable) — wajib punya kode sebelum pakai fitur */}
+    {showAuthModal && !code && (
+      <AuthModal onAuthenticated={(c) => handleAuthenticated(c)} />
+    )}
+    </>
   );
 }
 
