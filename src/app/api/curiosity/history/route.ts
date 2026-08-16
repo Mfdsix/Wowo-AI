@@ -1,19 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { prisma, ensureSessionOwnerCode } from "@/lib/prisma";
+import { getCodeFromCookies, SUPER_ADMIN_CODE } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 // ─── Curiosity Engine: History & Saves (PRD §12, §19) ──────
 // GET /api/curiosity/history  → discovery terakhir + saved topics.
+// Di-scope ke kode akses user di cookie (history per-user).
 export async function GET(req: NextRequest) {
   try {
+    await ensureSessionOwnerCode();
+    const code = getCodeFromCookies(await cookies()) ?? SUPER_ADMIN_CODE;
+    const profileId = code;
+
     const url = new URL(req.url);
     // Default: semua delivery (semua penemuan yang pernah muncul) biar bisa
     // dibuka lagi kapanpun. ?saved=1 → cuma yang di-Simpan (bookmark header).
     const savedOnly = url.searchParams.get("saved") === "1";
 
     const deliveries = await prisma.discoveryDelivery.findMany({
-      where: { profileId: "default" },
+      where: { profileId },
       orderBy: { deliveredAt: "desc" },
       take: 40,
       select: {
@@ -26,7 +33,7 @@ export async function GET(req: NextRequest) {
             hook: true,
             category: true,
             question: true,
-            saves: { select: { id: true } },
+            saves: { where: { profileId }, select: { id: true } },
           },
         },
       },

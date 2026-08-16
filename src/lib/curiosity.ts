@@ -287,28 +287,37 @@ Targetkan ${level === 4 ? "400-600" : "150-250"} kata dalam markdown yang mudah 
 }
 
 // ─── Save topic (PRD §19 #9) ───────────────────────────────────
-export async function saveDiscovery(discoveryId: string, note?: string) {
+// `profileId` = kode akses user (dijadikan id LearnerProfile) biar simpan
+// bersifat per-user, bukan global.
+export async function saveDiscovery(
+  discoveryId: string,
+  note: string | undefined,
+  profileId: string
+) {
   return prisma.savedDiscovery.upsert({
-    where: { discoveryId },
+    where: { profileId_discoveryId: { profileId, discoveryId } },
     update: { note: note ?? null },
-    create: { discoveryId, note: note ?? null },
+    create: { discoveryId, profileId, note: note ?? null },
   });
 }
 
 // ─── Feedback / memory capture (PRD §11, §23) ─────────────────
-export async function recordEvent(opts: {
-  discoveryId: string;
-  type: string;
-  level?: number;
-  metadata?: string;
-}) {
+export async function recordEvent(
+  opts: {
+    discoveryId: string;
+    type: string;
+    level?: number;
+    metadata?: string;
+  },
+  profileId: string
+) {
   const delivery =
     (await prisma.discoveryDelivery.findFirst({
-      where: { profileId: "default", discoveryId: opts.discoveryId },
+      where: { profileId, discoveryId: opts.discoveryId },
       select: { id: true, maxDepth: true },
     })) ??
     (await prisma.discoveryDelivery.create({
-      data: { profileId: "default", discoveryId: opts.discoveryId },
+      data: { profileId, discoveryId: opts.discoveryId },
       select: { id: true, maxDepth: true },
     }));
 
@@ -345,9 +354,9 @@ export async function recordEvent(opts: {
     const tag = disc?.topic?.slug ?? opts.discoveryId;
     const type = opts.type === "not_interested" ? "avoid" : "curious";
     await prisma.interestTag.upsert({
-      where: { profileId_tag_type: { profileId: "default", tag, type } },
+      where: { profileId_tag_type: { profileId, tag, type } },
       update: { weight: { increment: 1 }, updatedAt: new Date() },
-      create: { profileId: "default", tag, type },
+      create: { profileId, tag, type },
     });
   }
 
@@ -388,8 +397,13 @@ Jawab dengan cara yang melanjutkan rasa penasaran mereka. Jangan keluar dari per
 
 // ─── Daily Rabbit Hole (PRD §14) ─────────────────────────────
 // Generate satu curated journey harian: rantai topik lintas-bidang.
-export async function generateDailyJourney(signal?: AbortSignal) {
-  const profile = await getLearnerContext();
+// Daily journey itu feed global (bukan per-user), jadi pakai profil "daily"
+// yang diseksekusi bersama antar user.
+export async function generateDailyJourney(
+  signal?: AbortSignal,
+  profileId: string = "daily"
+) {
+  const profile = await getLearnerContext(profileId);
   const sys = `Kamu menyusun SATU perjalanan "lubang kelinci" yang kohesif untuk aplikasi rasa penasaran — rantai 4-5 subjek menarik yang saling terhubung dan melintasi bidang (sejarah → teknologi → alam → filsafat, dll). Setiap langkah harus nyata dan terhubung ke langkah sebelumnya. Keluarkan HANYA objek JSON mentah, tanpa markdown, tanpa komentar. JANGAN bungkus dalam code fence dan JANGAN menambah teks di luar JSON. TULISLAH semua teks (title, theme, topic, blurb) dalam Bahasa Indonesia.`;
   const prompt = `Buat SATU perjalanan lubang kelinci harian.
 ${profile.curiousTopics.length ? `Cenderung ke: ${profile.curiousTopics.slice(0, 8).join(", ")}.` : ""}
@@ -413,20 +427,22 @@ di mana steps berisi 4-5 entri, setiap blurb adalah 1 kalimat memikat yang diakh
 
 
 // ─── Context pengguna untuk ranking & anti-repetition ───────────
-export async function getLearnerContext() {
+// `profileId` = kode akses user (dijadikan id LearnerProfile), jadi konteks
+// personalisasi (riwayat, minat, anti-repetition) itu per-user.
+export async function getLearnerContext(profileId: string) {
   const profile =
-    (await prisma.learnerProfile.findUnique({ where: { id: "default" } })) ??
-    (await prisma.learnerProfile.create({ data: { id: "default" } }));
+    (await prisma.learnerProfile.findUnique({ where: { id: profileId } })) ??
+    (await prisma.learnerProfile.create({ data: { id: profileId } }));
 
   const [deliveries, interests, recentDeliveries] = await Promise.all([
     prisma.discoveryDelivery.findMany({
-      where: { profileId: "default" },
+      where: { profileId },
       select: { discovery: { select: { hook: true } } },
       take: 50,
     }),
-    prisma.interestTag.findMany({ where: { profileId: "default" } }),
+    prisma.interestTag.findMany({ where: { profileId } }),
     prisma.discoveryDelivery.findMany({
-      where: { profileId: "default" },
+      where: { profileId },
       orderBy: { deliveredAt: "desc" },
       take: 20,
       select: { discovery: { select: { hook: true } } },

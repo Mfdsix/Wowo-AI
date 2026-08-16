@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { prisma, ensureSessionOwnerCode } from "@/lib/prisma";
 import {
   generateCandidate,
   scoreCandidate,
@@ -8,6 +9,7 @@ import {
   persistDiscovery,
   type CandidateDiscovery,
 } from "@/lib/curiosity";
+import { getCodeFromCookies, SUPER_ADMIN_CODE } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -19,12 +21,17 @@ export const dynamic = "force-dynamic";
 //   4. Persist (candidate) + record DiscoveryDelivery (history)
 //
 // Body opsional: { "force": boolean } untuk bypass cache/anti-repetition.
+// Semua konteks personal (profileId) di-scope ke kode akses user di cookie.
 export async function POST(req: NextRequest) {
   try {
+    await ensureSessionOwnerCode();
+    const code = getCodeFromCookies(await cookies()) ?? SUPER_ADMIN_CODE;
+    const profileId = code;
+
     const body = await req.json().catch(() => ({}));
     const force = body?.force === true;
 
-    const profile = await getLearnerContext();
+    const profile = await getLearnerContext(profileId);
 
     let candidate: CandidateDiscovery;
     let attempts = 0;
@@ -54,7 +61,7 @@ export async function POST(req: NextRequest) {
     // Catat delivery (history + anti-repetition ledger, §12).
     await prisma.discoveryDelivery.create({
       data: {
-        profileId: "default",
+        profileId,
         discoveryId: discovery.id,
         outcome: "viewed",
       },

@@ -1,17 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { prisma, ensureSessionOwnerCode } from "@/lib/prisma";
 import { askDiscovery, recordEvent } from "@/lib/curiosity";
+import { getCodeFromCookies, SUPER_ADMIN_CODE } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 // ─── Curiosity Engine: Contextual Ask (PRD §10) ─────────────
 // POST /api/curiosity/:discoveryId/ask
 //   body: { question: string, priorAnswers?: string[] }
+// Di-scope ke kode akses user (profileId).
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ discoveryId: string }> }
 ) {
   try {
+    await ensureSessionOwnerCode();
+    const code = getCodeFromCookies(await cookies()) ?? SUPER_ADMIN_CODE;
+    const profileId = code;
+
     const { discoveryId } = await params;
     const discovery = await prisma.discovery.findUnique({
       where: { id: discoveryId },
@@ -29,11 +36,14 @@ export async function POST(
 
     const answer = await askDiscovery(discovery, question, prior, req.signal);
 
-    await recordEvent({
-      discoveryId,
-      type: "question_asked",
-      metadata: JSON.stringify({ question, answer: answer.slice(0, 500) }),
-    });
+    await recordEvent(
+      {
+        discoveryId,
+        type: "question_asked",
+        metadata: JSON.stringify({ question, answer: answer.slice(0, 500) }),
+      },
+      profileId
+    );
 
     return NextResponse.json({ answer });
   } catch (err) {

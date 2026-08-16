@@ -1,12 +1,39 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { prisma, ensureSessionOwnerCode } from "@/lib/prisma";
+import {
+  getCodeFromCookies,
+  isValidCode,
+  isSuperAdmin,
+  sessionScopeWhere,
+} from "@/lib/auth";
+
+// Guard: pastikan session[id] itu milik kode di cookie (atau super admin).
+// Return session kalau ok, atau NextResponse 401/404 kalau gak berhak.
+async function resolveOwnedSession(id: string) {
+  const code = getCodeFromCookies(await cookies());
+  const session = await prisma.session.findUnique({
+    where: { id },
+    select: { id: true, ownerCode: true },
+  });
+  if (!session) return { error: NextResponse.json({ error: "Session tidak ditemukan" }, { status: 404 }) };
+  if (isSuperAdmin(code)) return { session };
+  if (!isValidCode(code) || session.ownerCode !== code) {
+    return { error: NextResponse.json({ error: "Akses ditolak." }, { status: 401 }) };
+  }
+  return { session };
+}
 
 // DELETE /api/sessions/[id] — hapus session & messages (cascade)
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  await ensureSessionOwnerCode();
   const { id } = await params;
+
+  const owned = await resolveOwnedSession(id);
+  if ("error" in owned) return owned.error;
 
   await prisma.session.delete({ where: { id } });
 
@@ -47,6 +74,9 @@ export async function PATCH(
     );
   }
 
+  const owned = await resolveOwnedSession(id);
+  if ("error" in owned) return owned.error;
+
   const session = await prisma.session.update({
     where: { id },
     data,
@@ -56,6 +86,7 @@ export async function PATCH(
       designStyle: true,
       mode: true,
       podcastConfig: true,
+      ownerCode: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },
@@ -70,7 +101,11 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  await ensureSessionOwnerCode();
   const { id } = await params;
+
+  const owned = await resolveOwnedSession(id);
+  if ("error" in owned) return owned.error;
 
   const session = await prisma.session.findUnique({
     where: { id },
@@ -80,6 +115,7 @@ export async function GET(
       designStyle: true,
       mode: true,
       podcastConfig: true,
+      ownerCode: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { messages: true } },
