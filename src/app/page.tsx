@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { LayoutDashboard, MessagesSquare, Mic } from "lucide-react";
+import { LayoutDashboard, MessagesSquare, Mic, PanelLeftClose, PanelLeft } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput, { type PendingFile } from "@/components/MessageInput";
@@ -126,6 +126,8 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
+  // Sidebar hidden by default — user buka lewat tombol toggle.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // ─── Auth (6-digit session code) ─────────────────────────────
   // `code` null = belum punya sesi → modal unlock muncul (uncoseable).
@@ -286,7 +288,8 @@ export default function Home() {
       model?: string,
       replyToId?: string | null,
       quoteText?: string | null,
-      speaker?: string | null
+      speaker?: string | null,
+      reasoning?: string | null
     ) => {
       try {
         const res = await fetch(`/api/sessions/${sessionId}/messages`, {
@@ -299,6 +302,7 @@ export default function Home() {
             replyToId: replyToId || null,
             quoteText: quoteText || null,
             speaker: speaker || null,
+            reasoning: reasoning || null,
           }),
         });
         if (!res.ok) throw new Error("Failed to save message");
@@ -368,12 +372,32 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ─── New session ────────────────────────────────────────────
-  const handleNewSession = useCallback(async () => {
-    // Kalau session yang aktif sekarang udah kosong (0 messages), tinggal pake session ini aja.
-    if (activeSessionId && messages.length === 0) {
-      return;
-    }
+  // ─── New session (lazy) ─────────────────────────────────────
+  // Session BARU gak langsung dibuat di DB — cuma reset state lokal.
+  // Session baru di-persist (POST /api/sessions) BARU setelah user kirim
+  // chat pertama (lihat ensureSession di handleSubmit). Jadi kalau user
+  // klik "New Chat" tapi gak jadi chat, gak ada room kosong yang nyangkut.
+  const handleNewSession = useCallback(() => {
+    setActiveSessionId(null);
+    podcastSessionIdRef.current = null;
+    setMessages([]);
+    podcastMessagesRef.current = [];
+    podcastTopicRef.current = "";
+    setReplyTarget(null);
+    setInput("");
+    // Keluar dari designer mode biar "New Chat" beneran balik ke chat —
+    // kalau gak di-reset, canvas designer & page-nya tetap kelihatan dan
+    // pesan pertama malah lewat handleDesignerSubmit (designer:true) → AI
+    // langsung generate HTML/mockup alih-alih ngobrol.
+    setViewMode("chat");
+    setDesignerPages([]);
+    setActivePageId(null);
+    setActiveSection(null);
+    designerSubmitRef.current = null;
+  }, []);
+
+  // Buat session baru di DB (dipakai pas kirim chat pertama di room kosong).
+  const createSession = useCallback(async (): Promise<string | null> => {
     try {
       const res = await fetch("/api/sessions", {
         method: "POST",
@@ -385,13 +409,12 @@ export default function Home() {
       setSessions((prev) => [session, ...prev]);
       setActiveSessionId(session.id);
       podcastSessionIdRef.current = session.id;
-      setMessages([]);
-      podcastMessagesRef.current = [];
-      podcastTopicRef.current = "";
+      return session.id;
     } catch (err) {
-      console.error("handleNewSession error:", err);
+      console.error("createSession error:", err);
+      return null;
     }
-  }, [activeSessionId, messages.length]);
+  }, []);
 
   // ─── Podcast pipeline refs & helpers ─────────────────────────────────
   const turnsCommittedRef = useRef(0);       // turn yang udah commit (persisted atau temp bubble)
@@ -555,7 +578,15 @@ export default function Home() {
   // ─── Send message ───────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     const trimmed = input.trim();
-    if ((!trimmed && pendingFiles.length === 0) || !activeSessionId || isLoading) return;
+    if ((!trimmed && pendingFiles.length === 0) || isLoading) return;
+
+    // Lazy-create session: kalau "New Chat" belum jadi room di DB (activeSessionId
+    // null), buat sekarang — session cuma ke-persist setelah chat pertama dikirim.
+    let sid = activeSessionId;
+    if (!sid) {
+      sid = await createSession();
+      if (!sid) return; // gagal bikin session → stop
+    }
 
     const userContent = trimmed;
     // Capture reply reference & files sebelum di-clear
@@ -581,7 +612,7 @@ export default function Home() {
     // (penting biar history state cuma punya id real — kalau gak, pesan user
     //  selalu ke-filter dan AI kehilangan konteks pertanyaan sebelumnya)
     const savedUserMsg = await saveMessage(
-      activeSessionId,
+      sid,
       "user",
       userContent,
       undefined,
@@ -596,7 +627,7 @@ export default function Home() {
         const upForm = new FormData();
         files.forEach((f) => upForm.append("files", f.file));
         const upRes = await fetch(
-          `/api/sessions/${activeSessionId}/messages/${savedUserMsg.id}/attachments`,
+          `/api/sessions/${sid}/messages/${savedUserMsg.id}/attachments`,
           { method: "POST", body: upForm }
         );
         if (upRes.ok) {
@@ -630,7 +661,7 @@ export default function Home() {
     if (currentMessages.length === 0) {
       const autoTitle =
         userContent.slice(0, 40) + (userContent.length > 40 ? "..." : "");
-      updateSessionTitle(activeSessionId, autoTitle);
+      updateSessionTitle(sid, autoTitle);
     }
 
     // 4. Stream response from LLM
@@ -655,10 +686,10 @@ export default function Home() {
           { role: "user", content: userContent },
         ])
       );
-      chatForm.append("sessionId", activeSessionId);
+      chatForm.append("sessionId", sid);
       chatForm.append(
         "designStyle",
-        sessions.find((s) => s.id === activeSessionId)?.designStyle ?? ""
+        sessions.find((s) => s.id === sid)?.designStyle ?? ""
       );
       // Kasih tau AI bahwa user mereferensi pertanyaan/teks sebelumnya
       // Quote → pake teks yang di-highlight; Reply → pake isi pesan
@@ -687,13 +718,14 @@ export default function Home() {
       // Sumber RAG (dokumen + halaman) yang dipake AI buat jawab
       sources = parseSources(res.headers.get("x-retrieval-sources"));
 
-      // 5. Read streaming response
+      // 5. Read streaming response (SSE: data:{"type":"think"|"answer","text":...})
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
 
       const decoder = new TextDecoder();
       const assistantId = `assist-${uuid()}`;
       let assistantContent = "";
+      let assistantReasoning = "";
 
       // Add placeholder assistant message
       setMessages((prev) => [
@@ -701,34 +733,66 @@ export default function Home() {
         { id: assistantId, role: "assistant", content: "", sources },
       ]);
 
+      let buf = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
-        // Plain text chunks langsung dari AI SDK
-        const text = decoder.decode(value, { stream: true });
-        assistantContent += text;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: assistantContent } : m
-          )
-        );
+        buf += decoder.decode(value, { stream: true });
+        // Parse tiap event SSE yang sudah lengkap (diawali "data:" diakhiri \n\n).
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const line = raw.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const ev = JSON.parse(payload) as { type: "think" | "answer"; text: string };
+            if (ev.type === "think") {
+              assistantReasoning += ev.text;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, reasoning: assistantReasoning } : m
+                )
+              );
+            } else {
+              assistantContent += ev.text;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, content: assistantContent } : m
+                )
+              );
+            }
+          } catch {
+            // Bukan JSON valid → anggap sebagai teks jawaban mentah (fallback).
+            assistantContent += payload;
+          }
+        }
       }
 
       // 6. Save assistant message ke DB, ganti placeholder assist- dengan pesan asli
       if (assistantContent) {
         const modelName = res.headers.get("x-llm-model") || undefined;
         const savedAssistantMsg = await saveMessage(
-          activeSessionId,
+          sid,
           "assistant",
           assistantContent,
-          modelName
+          modelName,
+          null,
+          null,
+          null,
+          assistantReasoning || null
         );
         if (savedAssistantMsg) {
-          // Pertahankan sources (gak di-persist di DB, cuma di state)
+          // Pertahankan sources & reasoning (gak di-persist ke DB, cuma di
+          // state session) — reasoning WAJIB dipertahankan, kalau gak toggle
+          // "Pemikiran wowo" hilang begitu pesan diganti dgn hasil saveMessage.
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantId ? { ...savedAssistantMsg, sources } : m
+              m.id === assistantId
+                ? { ...savedAssistantMsg, sources, reasoning: assistantReasoning || null }
+                : m
             )
           );
         }
@@ -739,7 +803,7 @@ export default function Home() {
         // Save partial content & ganti placeholder dengan pesan asli
         const partialMsg = messages.find((m) => m.id.startsWith("assist-"));
         if (partialMsg?.content) {
-          const saved = await saveMessage(activeSessionId, "assistant", partialMsg.content);
+          const saved = await saveMessage(sid, "assistant", partialMsg.content);
           if (saved) {
             setMessages((prev) =>
               prev.map((m) => (m.id === partialMsg.id ? { ...saved, sources } : m))
@@ -763,7 +827,7 @@ export default function Home() {
       abortRef.current = null;
       fetchSessions();
     }
-  }, [input, activeSessionId, isLoading, messages, replyTarget, pendingFiles, clearPendingFiles, sessions, saveMessage, updateSessionTitle, fetchSessions]);
+  }, [input, activeSessionId, isLoading, messages, replyTarget, pendingFiles, clearPendingFiles, sessions, saveMessage, updateSessionTitle, fetchSessions, createSession]);
 
   // ─── Podcast mode: orchestrator ────────────────────────────────
   // Semua nilai yang dibaca loop async diambil dari ref biar gak kena stale-closure.
@@ -1494,24 +1558,57 @@ export default function Home() {
       const decoder = new TextDecoder();
       const assistantId = `assist-${uuid()}`;
       let assistantContent = "";
+      let assistantReasoning = "";
 
       setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources }]);
 
+      let buf = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
-        const text = decoder.decode(value, { stream: true });
-        assistantContent += text;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: assistantContent } : m
-          )
-        );
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const line = raw.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const ev = JSON.parse(payload) as { type: "think" | "answer"; text: string };
+            if (ev.type === "think") {
+              assistantReasoning += ev.text;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, reasoning: assistantReasoning } : m
+                )
+              );
+            } else {
+              assistantContent += ev.text;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, content: assistantContent } : m
+                )
+              );
+            }
+          } catch {
+            assistantContent += payload;
+          }
+        }
       }
 
       if (assistantContent) {
-        await saveMessage(activeSessionId, "assistant", assistantContent);
+        await saveMessage(
+          activeSessionId,
+          "assistant",
+          assistantContent,
+          undefined,
+          null,
+          null,
+          null,
+          assistantReasoning || null
+        );
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") {
@@ -1956,9 +2053,10 @@ export default function Home() {
   const isPodcastSession = activeSession?.mode === "podcast";
 
   return (
-    <div className="flex h-screen overflow-hidden bg-zinc-900">
-      {/* Sidebar di chat & podcast mode — designer auto fullscreen */}
-      {viewMode !== "designer" && (
+    <div className="flex h-screen overflow-hidden app-shell">
+      {/* Sidebar di chat & podcast mode — hidden by default, buka via toggle.
+          Designer auto fullscreen (sidebar gak kepakai). */}
+      {viewMode !== "designer" && sidebarOpen && (
         <Sidebar
           sessions={sessions}
           activeSessionId={activeSessionId}
@@ -1973,10 +2071,10 @@ export default function Home() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* User / session bar — indikator kode akses + aksi admin/logout */}
         {code && (
-          <div className="flex items-center justify-between gap-2 border-b border-zinc-800 bg-zinc-950/60 px-3 py-1.5 shrink-0">
+          <div className="flex items-center justify-between gap-2 border-b hairline bg-white/[0.10] px-3 py-1.5 shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-[11px] text-zinc-500">Sesi:</span>
-              <span className="font-mono text-xs text-indigo-300 truncate">
+              <span className="font-mono text-xs accent-text truncate">
                 {code === "789000" ? "SUPER ADMIN" : code}
               </span>
               {isAdmin && (
@@ -1997,14 +2095,28 @@ export default function Home() {
           </div>
         )}
 
-        {/* View toggle: Chat | Podcast | Designer */}
-        <div className="flex items-center justify-center gap-1 border-b border-zinc-800 bg-zinc-900/95 py-1.5 shrink-0">
+        {/* View toggle: Chat | Podcast | Designer — mode group di-center.
+            Toggle sidebar di-poaku hard-left (absolute dlm bar ini). */}
+        <div className="relative flex items-center justify-center gap-1 border-b hairline bg-white/[0.10] py-1.5 shrink-0">
+          {/* Toggle sidebar — absolute kiri DALAM bar ini (relative ke parent).
+              Designer fullscreen → gak perlu toggle. */}
+          {viewMode !== "designer" && (
+            <button
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center justify-center p-1.5
+                         rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.10]
+                         transition-colors duration-150"
+              title={sidebarOpen ? "Sembunyikan sidebar" : "Tampilkan sidebar"}
+            >
+              {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
+            </button>
+          )}
           <button
             onClick={() => setViewMode("chat")}
             className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
               viewMode === "chat"
-                ? "bg-zinc-800 text-zinc-100"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                ? "bg-white/[0.14] text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.10]"
             }`}
           >
             <MessagesSquare size={14} />
@@ -2014,8 +2126,8 @@ export default function Home() {
             onClick={() => setViewMode("podcast")}
             className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
               viewMode === "podcast"
-                ? "bg-indigo-600 text-white"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                ? "bg-violet-600 text-white"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.10]"
             }`}
           >
             <Mic size={14} />
@@ -2026,8 +2138,8 @@ export default function Home() {
             onClick={() => setViewMode("designer")}
             className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
               viewMode === "designer"
-                ? "bg-indigo-600 text-white"
-                : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
+                ? "bg-violet-600 text-white"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.10]"
             }`}
           >
             <LayoutDashboard size={14} />

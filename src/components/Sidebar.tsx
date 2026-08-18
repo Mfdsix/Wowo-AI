@@ -57,14 +57,14 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="w-72 h-screen flex flex-col bg-zinc-950 border-r border-zinc-800">
+    <aside className="w-72 h-screen flex flex-col bg-white/[0.10] border-r hairline">
       {/* Header */}
-      <div className="p-3 border-b border-zinc-800">
+      <div className="p-3 border-b hairline">
         <button
           onClick={onNewSession}
-          className="w-full flex items-center gap-2 px-4 py-2.5 rounded-lg
-                     bg-zinc-800 hover:bg-zinc-700 text-zinc-200
-                     transition-colors duration-150 text-sm font-medium"
+          className="brand-gradient w-full flex items-center gap-2 px-4 py-2.5 rounded-lg
+                     text-white border border-white/[0.14] shadow-lg shadow-violet-900/20
+                     transition-all duration-150 text-sm font-semibold"
         >
           <MessageSquarePlus size={18} />
           New Chat
@@ -90,13 +90,13 @@ export default function Sidebar({
               className={`group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer
                          transition-colors duration-150 text-sm ${
                 activeSessionId === session.id
-                  ? "bg-zinc-800 text-zinc-100"
-                  : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200"
+                  ? "bg-white/[0.14] text-zinc-100"
+                  : "text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200"
               }`}
               onClick={() => onSelectSession(session.id)}
             >
               {session.mode === "podcast" ? (
-                <Mic size={16} className="shrink-0 text-indigo-400" />
+                <Mic size={16} className="shrink-0 text-violet-400" />
               ) : (
                 <MessageSquare size={16} className="shrink-0" />
               )}
@@ -111,8 +111,8 @@ export default function Sidebar({
                     if (e.key === "Escape") setEditingId(null);
                   }}
                   onClick={(e) => e.stopPropagation()}
-                  className="flex-1 min-w-0 bg-zinc-700 text-zinc-100 rounded px-1.5 py-0.5
-                             text-sm outline-none border border-indigo-500"
+                  className="flex-1 min-w-0 bg-white/[0.10] text-zinc-100 rounded px-1.5 py-0.5
+                             text-sm outline-none border border-violet-500"
                 />
               ) : (
                 <span className="flex-1 truncate">{session.title}</span>
@@ -128,7 +128,7 @@ export default function Sidebar({
                       startRename(session);
                     }}
                     className="opacity-0 group-hover:opacity-100 p-1 rounded
-                               hover:bg-zinc-700 text-zinc-500 hover:text-zinc-200
+                               hover:bg-white/[0.10] text-zinc-500 hover:text-zinc-200
                                transition-all duration-150"
                     title="Rename chat"
                   >
@@ -140,7 +140,7 @@ export default function Sidebar({
                       onDeleteSession(session.id);
                     }}
                     className="opacity-0 group-hover:opacity-100 p-1 rounded
-                               hover:bg-zinc-700 text-zinc-500 hover:text-red-400
+                               hover:bg-white/[0.10] text-zinc-500 hover:text-red-400
                                transition-all duration-150"
                     title="Delete chat"
                   >
@@ -154,17 +154,17 @@ export default function Sidebar({
       </div>
 
       {/* Footer */}
-      <div className="p-3 border-t border-zinc-800 space-y-1">
+      <div className="p-3 border-t hairline space-y-1">
         <Link
           href="/curiosity"
-          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200 text-sm transition-colors duration-150"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200 text-sm transition-colors duration-150"
         >
           <Compass size={16} className="text-amber-400" />
           Curiosity Engine
         </Link>
         <Link
           href="/journal"
-          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200 text-sm transition-colors duration-150"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200 text-sm transition-colors duration-150"
         >
           <FlaskConical size={16} className="text-sky-400" />
           Journal Engine

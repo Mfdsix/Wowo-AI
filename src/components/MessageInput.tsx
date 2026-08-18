@@ -77,8 +77,11 @@ export default function MessageInput({
     e.target.value = "";
   };
 
-  const canSend = !isLoading && sessionId && (input.trim() !== "" || pendingFiles.length > 0);
-  const disabled = !sessionId || isLoading;
+  // sessionId boleh null saat "New Chat" (lazy-persist): session cuma di-POST
+  // ke DB pas kirim chat pertama (handleSubmit → createSession). Jadi input &
+  // tombol send/attach tetap aktif tanpa session; yang nge-gate cuma isLoading.
+  const canSend = !isLoading && (input.trim() !== "" || pendingFiles.length > 0);
+  const disabled = isLoading;
 
   const preview = (text: string) => {
     const clean = text.replace(/[#*`>_~]/g, "").trim();
@@ -86,11 +89,11 @@ export default function MessageInput({
   };
 
   return (
-    <div className="border-t border-zinc-800 bg-zinc-900/80 backdrop-blur-sm">
+    <div className="border-t hairline bg-white/[0.10] backdrop-blur-sm">
       <div className="max-w-3xl mx-auto px-4 py-3">
         {/* Reply quote banner */}
         {replyTarget && (
-          <div className="mb-2 flex items-start gap-2 rounded-lg border border-zinc-700 bg-zinc-800/70 px-3 py-2">
+          <div className="mb-2 flex items-start gap-2 rounded-lg border border-white/[0.12] bg-white/[0.10] px-3 py-2">
             <CornerUpLeft size={14} className="text-zinc-500 mt-0.5 shrink-0" />
             <div className="flex-1 min-w-0">
               <p className="text-[11px] text-zinc-500">
@@ -117,7 +120,7 @@ export default function MessageInput({
             {pendingFiles.map((f) => (
               <div
                 key={f.id}
-                className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5"
+                className="flex items-center gap-2 rounded-lg border border-white/[0.12] bg-white/[0.10] px-2 py-1.5"
               >
                 <FileTypeIcon
                   mimeType={f.file.type || "application/octet-stream"}
@@ -147,28 +150,23 @@ export default function MessageInput({
             value={input}
             onChange={(e) => onInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={
-              sessionId
-                ? "Type a message... (Shift+Enter for new line, or attach a file)"
-                : "Create or select a chat first"
-            }
+            placeholder="Type a message... (Shift+Enter for new line, or attach a file)"
             disabled={disabled}
             rows={1}
-            className="w-full resize-none rounded-xl border border-zinc-700
-                       bg-zinc-800 px-4 py-3 pr-24 text-sm text-zinc-100
+            className="focus-accent w-full resize-none rounded-xl border border-white/[0.12]
+                       bg-white/[0.10] px-4 py-3 pr-24 text-sm text-zinc-100
                        placeholder-zinc-500
-                       focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent
                        disabled:opacity-50 disabled:cursor-not-allowed
                        transition-all duration-150"
           />
 
-          <div className="absolute right-2 bottom-2 flex gap-1">
+          <div className="absolute right-2 top-1.5 flex items-center gap-1">
             {/* Attach file */}
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
-              className="p-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700
+              className="flex items-center justify-center p-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.10]
                          disabled:opacity-40 disabled:cursor-not-allowed
                          transition-colors duration-150"
               title="Attach file (gambar, PDF, DOCX, teks/kode)"
@@ -189,7 +187,7 @@ export default function MessageInput({
               <button
                 type="button"
                 onClick={onStop}
-                className="p-2 rounded-lg bg-red-600 hover:bg-red-500
+                className="flex items-center justify-center p-2 rounded-lg bg-red-500/90 hover:bg-red-500
                            text-white transition-colors duration-150"
                 title="Stop generating"
               >
@@ -199,9 +197,9 @@ export default function MessageInput({
               <button
                 type="submit"
                 disabled={!canSend}
-                className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500
-                           text-white disabled:bg-zinc-700 disabled:text-zinc-500
-                           transition-colors duration-150"
+                className="brand-gradient flex items-center justify-center p-2 rounded-lg text-white
+                           disabled:text-zinc-500
+                           disabled:cursor-not-allowed transition-colors duration-150"
                 title="Send message"
               >
                 <Send size={16} />
