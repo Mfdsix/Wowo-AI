@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard, Compass, Sparkles } from "lucide-react";
+import { Loader2, Bot, User, Copy, Check, X, FileText, RefreshCw, Bookmark, BookmarkCheck, CornerUpLeft, LayoutDashboard, Compass, Sparkles, Brain, ChevronDown } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import CodeBlock from "./CodeBlock";
 import BookmarkPanel from "./BookmarkPanel";
@@ -187,9 +187,9 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   // State: belum pilih session
   if (!sessionId) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-zinc-900">
+      <div className="flex-1 flex items-center justify-center bg-transparent">
         <div className="text-center">
-          <Bot size={48} className="mx-auto mb-4 text-zinc-600" />
+          <Bot size={48} className="mx-auto mb-4 text-zinc-700" />
           <h2 className="text-xl font-semibold text-zinc-400 mb-2">
             Select or create a chat
           </h2>
@@ -204,7 +204,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   // State: session dipilih tapi belum ada pesan
   if (messages.length === 0 && !isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-zinc-900 px-4">
+      <div className="flex-1 flex items-center justify-center bg-transparent px-4">
         <div className="text-center w-full max-w-md">
           {/* Highlighted Curiosity Engine CTA — persuasive redirect */}
           <Link
@@ -242,7 +242,7 @@ export default function ChatArea({ messages, isLoading, sessionId, onRegenerateA
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto bg-zinc-900">
+    <div ref={scrollRef} className="flex-1 overflow-y-auto bg-transparent">
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
         {messages.map((msg, idx) => {
           // Cari pesan yang di-reply (buat quote)
@@ -412,10 +412,10 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
         <div
           className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
             isError
-              ? "bg-red-900 text-red-300"
+              ? "bg-red-950 text-red-300"
               : isUser
-              ? "bg-indigo-600 text-white"
-              : "bg-zinc-700 text-zinc-300"
+              ? "bg-violet-600 text-white"
+              : "bg-white/[0.10] text-zinc-300"
           }`}
         >
           {isError ? <Bot size={16} /> : isUser ? <User size={16} /> : <Bot size={16} />}
@@ -430,16 +430,30 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
             )}
           </p>
 
+          {/* Toggle "Pemikiran wowo" — proses berpikir model (blok <think>) */}
+          {!isUser && !isError && message.reasoning && message.reasoning.trim() && (
+            <details className="mb-1.5 group/think">
+              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300 transition-colors duration-150">
+                <Brain size={12} className="text-violet-400/80" />
+                <span>Pemikiran wowo</span>
+                <ChevronDown size={11} className="transition-transform group-open/think:rotate-180" />
+              </summary>
+              <div className="mt-1 max-h-72 overflow-y-auto rounded-lg border border-white/[0.14] bg-white/[0.10] p-3 text-[12px] leading-relaxed text-zinc-400 whitespace-pre-wrap">
+                {message.reasoning}
+              </div>
+            </details>
+          )}
+
           {/* Quote reference — teks yang di-quote / pesan yang di-reply */}
           {replyToContent && (
             <div
               className={`mb-1.5 rounded-lg border-l-4 px-3 py-2 ${
                 isUser
-                  ? "border-indigo-400/70 bg-indigo-600/30"
-                  : "border-zinc-600 bg-zinc-800/60"
+                  ? "border-violet-400/70 bg-violet-600/20"
+                  : "border-white/[0.14] bg-white/[0.10]"
               }`}
             >
-              <p className={`text-[11px] mb-0.5 ${isUser ? "text-indigo-200" : "text-zinc-500"}`}>
+              <p className={`text-[11px] mb-0.5 ${isUser ? "text-violet-200" : "text-zinc-500"}`}>
                 <CornerUpLeft size={11} className="inline mr-1 -mt-0.5" />
                 {message.quoteText ? "Quoted" : "Replied to"}
               </p>
@@ -452,7 +466,7 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
           <div
             className={`rounded-xl px-4 py-3 ${
               isUser
-                ? "bg-indigo-600/80 text-white"
+                ? "bg-violet-600/80 text-white"
                 : isError
                 ? "bg-red-900/20 text-red-400"
                 : ""
@@ -529,7 +543,7 @@ function MessageBubble({ message, replyToContent, showRegenerate, onRegenerateAc
             <button
               onClick={() => onOpenInDesignerAction?.(message.content)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs
-                         text-indigo-400 hover:text-indigo-200 hover:bg-indigo-600/20
+                         text-violet-400 hover:text-violet-200 hover:bg-violet-600/20
                          transition-colors duration-150"
               title="Open this HTML in Designer mode"
             >

@@ -33,6 +33,9 @@ export type Message = {
   quoteText?: string | null;
   attachments?: AttachmentMeta[];
   createdAt?: string;
+  // Proses berpikir model (blok <think>). Ditampilin di UI lewat toggle
+  // "Pemikiran wowo" — gak di-persist ke DB di versi ini (cuma state session).
+  reasoning?: string | null;
   // Sumber RAG yang dipake buat jawab — dikirim via header, gak di-persist ke DB
   sources?: RetrievalSource[];
 };

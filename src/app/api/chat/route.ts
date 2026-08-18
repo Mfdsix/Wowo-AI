@@ -29,6 +29,7 @@ import {
   RETRIEVAL_TOP_K,
 } from "@/lib/retrieval";
 import type { RetrievalSource } from "@/lib/types";
+import { ThinkingSplitter } from "@/lib/thinkStream";
 
 export const dynamic = "force-dynamic";
 
@@ -414,18 +415,23 @@ export async function POST(req: NextRequest) {
       "The HTML must render standalone in a browser when opened directly. " +
       "Output ONLY the HTML inside a single fenced code block (```html ... ```). " +
       "Do NOT include any explanation, commentary, or additional text before or after the code block."
-    : "You can generate HTML files for the user. Always output your HTML inside a single " +
-      "HTML fenced code block (```html ... ```). " +
-      "You MAY use Tailwind CSS via CDN by including: " +
-      "<script src=\"https://cdn.tailwindcss.com\"></script> in the <head>. " +
-      "The HTML must render standalone in a browser when opened directly. " +
-      "Do NOT write any JavaScript besides the Tailwind CDN script. " +
-      "IMPORTANT — follow the user's intent exactly: " +
-      "If the user asks to BUILD/CREATE/MAKE a landing page, website, or UI design, " +
-      "output a COMPLETE, fully-styled, production-ready page with real content, colors, typography, and layout " +
-      "(NOT a wireframe). " +
-      "Only output a wireframe mockup (light gray boxes, dashed borders, placeholder labels like Navbar/Hero/Features/Footer) " +
-      "if the user EXPLICITLY asks for a WIREFRAME or MOCKUP.";
+    : "You are wowo.ai — a GENERAL-PURPOSE AI assistant that helps with ANYTHING: " +
+      "answering questions, explaining concepts, brainstorming, writing, analysis, math, " +
+      "planning, coding in any language, and yes — also building web/UI designs when asked. " +
+      "You are NOT limited to web/UI work. Always respond to the user's actual request in " +
+      "plain, helpful prose (Bahasa Indonesia unless they switch languages). " +
+      "Do NOT assume the user wants a website, landing page, or UI. Do NOT open with offers " +
+      "to build landing pages/websites/UI designs. " +
+      "HTML generation is an OPTIONAL capability: ONLY output HTML inside a single " +
+      "fenced code block (```html ... ```) when the user EXPLICITLY asks to BUILD/CREATE/MAKE " +
+      "a landing page, website, or UI design. " +
+      "When you do generate HTML: use the Tailwind CSS CDN " +
+      "(<script src=\"https://cdn.tailwindcss.com\"></script> in the <head>), " +
+      "make it render standalone in a browser when opened directly, and write NO JavaScript " +
+      "besides the Tailwind CDN script. Output a COMPLETE, fully-styled, production-ready page " +
+      "with real content, colors, typography, and layout (NOT a wireframe). " +
+      "Only output a wireframe mockup (light gray boxes, dashed borders, placeholder labels like " +
+      "Navbar/Hero/Features/Footer) if the user EXPLICITLY asks for a WIREFRAME or MOCKUP.";
 
   // Tambahan guidance MCP: dikasih ke model cuma kalo tools-nya aktif
   const MCP_GUIDE = needsMCP
@@ -496,10 +502,17 @@ export async function POST(req: NextRequest) {
         ...(useTools && mcp ? { onStepEnd, repairToolCall } : {}),
       });
 
-    // Convert stream async iterator ke ReadableStream,
-    // plus error handling biar error apapun kaga tembus ke client
+    // Convert stream async iterator ke ReadableStream.
+    // Tiap chunk dilewatkan ke ThinkingSplitter: blok <think> dipisah jadi
+    // event "think" (UI toggle "Pemikiran wowo"), sisanya event "answer".
+    // Error handling biar error apapun kaga tembus ke client.
+    const splitter = new ThinkingSplitter();
+    const enc = new TextEncoder();
     const readableStream = new ReadableStream({
       async start(controller) {
+        const enqueueEvent = (ev: { type: "think" | "answer"; text: string }) => {
+          controller.enqueue(enc.encode(`data:${JSON.stringify(ev)}\n\n`));
+        };
         let attemptTools = !!mcp;
         let emittedAny = false;
         try {
@@ -507,8 +520,10 @@ export async function POST(req: NextRequest) {
             try {
               const result = buildStream(attemptTools);
               for await (const chunk of result.textStream) {
-                emittedAny = true;
-                controller.enqueue(new TextEncoder().encode(chunk));
+                if (typeof chunk === "string" && chunk) {
+                  emittedAny = true;
+                  for (const ev of splitter.transform(chunk)) enqueueEvent(ev);
+                }
               }
             } catch (err) {
               // Model/server gak support function calling → retry sekali tanpa tools
@@ -528,6 +543,7 @@ export async function POST(req: NextRequest) {
             }
             break;
           }
+          for (const ev of splitter.flush()) enqueueEvent(ev);
         } catch (err) {
           console.error("LLM stream error:", err);
           const msg = errorMessage(err);
@@ -540,11 +556,11 @@ export async function POST(req: NextRequest) {
             : msg.includes("Cannot read properties")
             ? "LLM ngasih response format yang gak sesuai. Cek kompatibilitas model."
             : `LLM error: ${msg || "Unknown error"}`;
-          // Kirim error message sebagai teks di stream biar user liat
-          controller.enqueue(
-            new TextEncoder().encode(`\n\n_❌ ${errMsg}_`)
-          );
+          // Kirim error message sebagai teks di stream biar user lihat
+          enqueueEvent({ type: "answer", text: `\n\n_❌ ${errMsg}_` });
         } finally {
+          // Sinyal akhir stream biar client tahu udah kelar.
+          try { controller.enqueue(enc.encode("data:[DONE]\n\n")); } catch {}
           // Stream harus ditutup biar client gak nunggu forever
           try { await mcp?.close(); } catch {}
           try { controller.close(); } catch {}
@@ -558,7 +574,7 @@ export async function POST(req: NextRequest) {
 
     return new Response(readableStream, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
         "x-llm-model": modelName,
