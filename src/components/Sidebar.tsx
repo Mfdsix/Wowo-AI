@@ -1,7 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { MessageSquarePlus, Trash2, MessageSquare, Loader2, PenLine, Mic } from "lucide-react";
+import Link from "next/link";
+import {
+  MessageSquarePlus,
+  Trash2,
+  MessageSquare,
+  Loader2,
+  PenLine,
+  Mic,
+  Compass,
+  FlaskConical,
+} from "lucide-react";
 
 type Session = {
   id: string;
@@ -144,8 +154,22 @@ export default function Sidebar({
       </div>
 
       {/* Footer */}
-      <div className="p-3 border-t border-zinc-800">
-        <p className="text-xs text-zinc-600 text-center">wowo.ai</p>
+      <div className="p-3 border-t border-zinc-800 space-y-1">
+        <Link
+          href="/curiosity"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200 text-sm transition-colors duration-150"
+        >
+          <Compass size={16} className="text-amber-400" />
+          Curiosity Engine
+        </Link>
+        <Link
+          href="/journal"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200 text-sm transition-colors duration-150"
+        >
+          <FlaskConical size={16} className="text-sky-400" />
+          Journal Engine
+        </Link>
+        <p className="text-xs text-zinc-600 text-center pt-1">wowo.ai</p>
       </div>
     </aside>
   );
