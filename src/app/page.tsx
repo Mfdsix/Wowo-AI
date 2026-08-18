@@ -6,6 +6,7 @@ import Sidebar from "@/components/Sidebar";
 import ChatArea from "@/components/ChatArea";
 import MessageInput, { type PendingFile } from "@/components/MessageInput";
 import type { Message, ReplyTarget, AttachmentMeta, RetrievalSource } from "@/lib/types";
+import { uuid } from "@/lib/uuid";
 import AuthModal from "@/components/AuthModal";
 import AdminPanel from "@/components/AdminPanel";
 import DesignerCanvas from "@/components/DesignerCanvas";
@@ -536,7 +537,7 @@ export default function Home() {
       const toAdd = incoming.filter((f) => f.size <= MAX_CLIENT_BYTES).slice(0, room);
 
       const items: PendingFile[] = toAdd.map((f) => ({
-        id: crypto.randomUUID(),
+        id: uuid(),
         file: f,
       }));
       return [...prev, ...items];
@@ -566,7 +567,7 @@ export default function Home() {
 
     // 1. Add user message to UI immediately
     const tempUserMsg: Message = {
-      id: `temp-${crypto.randomUUID()}`,
+      id: `temp-${uuid()}`,
       role: "user",
       content: userContent,
       replyToId: activeReply?.id || null,
@@ -691,7 +692,7 @@ export default function Home() {
       if (!reader) throw new Error("No response body");
 
       const decoder = new TextDecoder();
-      const assistantId = `assist-${crypto.randomUUID()}`;
+      const assistantId = `assist-${uuid()}`;
       let assistantContent = "";
 
       // Add placeholder assistant message
@@ -751,7 +752,7 @@ export default function Home() {
         setMessages((prev) => [
           ...prev,
           {
-            id: `error-${crypto.randomUUID()}`,
+            id: `error-${uuid()}`,
             role: "assistant",
             content: `❌ Error: ${errMsg}`,
           },
@@ -910,7 +911,7 @@ export default function Home() {
     const sessionId = podcastSessionIdRef.current;
     if (!sessionId) return;
     const speaker = speakerAt(turnIndex);
-    const tempId = `assist-${crypto.randomUUID()}`;
+    const tempId = `assist-${uuid()}`;
 
     // Bangun history dari turn yang udah commit + teks paralel yang udah final
     // (turn yang teksnya kelar tapi audio masih diputar, belum masuk messages).
@@ -1491,7 +1492,7 @@ export default function Home() {
       if (!reader) throw new Error("No response body");
 
       const decoder = new TextDecoder();
-      const assistantId = `assist-${crypto.randomUUID()}`;
+      const assistantId = `assist-${uuid()}`;
       let assistantContent = "";
 
       setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", sources }]);
@@ -1521,7 +1522,7 @@ export default function Home() {
         setMessages((prev) => [
           ...prev,
           {
-            id: `error-${crypto.randomUUID()}`,
+            id: `error-${uuid()}`,
             role: "assistant",
             content: `❌ Error: ${errMsg}`,
           },

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { uuid } from "@/lib/uuid";
 
 // PATCH /api/sessions/[id]/designer-pages/[pageId]
 // - rename / update html (dengan snapshot versi)
@@ -32,7 +33,7 @@ export async function PATCH(
     }
     // Simpan state sekarang sebagai versi baru (biar bisa undo revert)
     const newVersions = [
-      { id: crypto.randomUUID(), html: existing.html, updatedAt: new Date().toISOString() },
+      { id: uuid(), html: existing.html, updatedAt: new Date().toISOString() },
       ...versions,
     ].slice(0, 20);
 
@@ -57,7 +58,7 @@ export async function PATCH(
   // ─── UPDATE html (dengan snapshot versi lama) ───
   if (html !== undefined && html !== existing.html) {
     const newVersions = [
-      { id: crypto.randomUUID(), html: existing.html, updatedAt: new Date().toISOString() },
+      { id: uuid(), html: existing.html, updatedAt: new Date().toISOString() },
       ...versions,
     ].slice(0, 20);
 
