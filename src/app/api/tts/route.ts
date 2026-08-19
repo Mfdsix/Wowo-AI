@@ -1,13 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { synthesize } from "@/lib/tts";
 import { sanitizeForTts } from "@/lib/podcast";
+import { maybeSyncGoogleTtsUsage } from "@/lib/googleMonitoring";
 
 export const dynamic = "force-dynamic";
 
 // Allowlist suara — jaga biar client gak bisa synthesize voice sembarangan.
+// Edge (Microsoft) + Google Cloud TTS WaveNet id-ID.
 const ALLOWED_VOICES = new Set([
   "id-ID-ArdiNeural",
   "id-ID-GadisNeural",
+  "id-ID-Wavenet-A",
+  "id-ID-Wavenet-B",
+  "id-ID-Wavenet-C",
+  "id-ID-Wavenet-D",
 ]);
 
 const MAX_TEXT_LENGTH = 3000;
@@ -53,6 +59,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // Reconcile usage dari Google secara berkala (lazy, lewat interval).
+    // Fire-and-forget: gak nge-block TTS, gak bikin error kalau gagal.
+    void maybeSyncGoogleTtsUsage();
+
     const audio = await synthesize(text, voice, { pitchShift });
     // Uint8Array baru (bukan Buffer) biar type-check sama BodyInit
     return new Response(new Uint8Array(audio), {
