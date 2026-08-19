@@ -47,6 +47,7 @@ type PodcastAreaProps = {
   onReplay: () => void;
   onStop: () => void;
   onResumeGesture: () => void;
+  onPersonasChange?: (personas: Record<Speaker, string>) => void;
 };
 
 // Colors & styles per speaker
@@ -337,6 +338,7 @@ export default function PodcastArea({
   onReplay,
   onStop,
   onResumeGesture,
+  onPersonasChange,
 }: PodcastAreaProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [topic, setTopic] = useState("");
@@ -344,11 +346,9 @@ export default function PodcastArea({
   const [names, setNames] = useState<Record<Speaker, string>>(
     podcastConfig.names
   );
-  const [personas, setPersonas] = useState<Record<Speaker, string>>({
-    host: "",
-    guestA: "",
-    guestB: "",
-  });
+  const [personas, setPersonas] = useState<Record<Speaker, string>>(
+    podcastConfig.personas ?? { host: "", guestA: "", guestB: "" }
+  );
   const [isSuggestingPersonas, setIsSuggestingPersonas] = useState(false);
   const [suggestNotice, setSuggestNotice] = useState("");
 
@@ -422,14 +422,27 @@ export default function PodcastArea({
     }
   };
 
-  // Sinkronkan nama speaker saat config berubah (mis. ganti session).
+  // Sinkronkan nama speaker & persona saat config berubah (mis. ganti session).
   // Pakai pola React "adjust state during render" biar gak kena
   // react-hooks/set-state-in-effect.
   const [prevConfig, setPrevConfig] = useState(podcastConfig);
   if (prevConfig !== podcastConfig) {
     setPrevConfig(podcastConfig);
     setNames(podcastConfig.names);
+    setPersonas(
+      podcastConfig.personas ?? { host: "", guestA: "", guestB: "" }
+    );
+    // Jangan panggil onPersonasChange di sini — itu setState parent saat
+    // render, bisa memicu render loop. Sync config→state lokal cukup.
   }
+
+  // Helper: update persona satu speaker + kabari parent (biar config di
+  // session ikut ke-update & ke-persist).
+  const updatePersona = (spk: Speaker, value: string) => {
+    const next = { ...personas, [spk]: value };
+    setPersonas(next);
+    onPersonasChange?.(next);
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -441,6 +454,7 @@ export default function PodcastArea({
     if (!topic.trim()) return;
     onStart(topic, {
       names,
+      personas,
       maxTurns: podcastConfig.maxTurns,
     });
   };
@@ -538,11 +552,14 @@ export default function PodcastArea({
                         className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-200 focus:border-indigo-500 focus:outline-none disabled:cursor-not-allowed"
                       />
                     </div>
-                    {personas[spk] && (
-                      <p className="text-xs text-zinc-400 pl-1 italic">
-                        {personas[spk]}
-                      </p>
-                    )}
+                    <textarea
+                      value={personas[spk]}
+                      onChange={(e) => updatePersona(spk, e.target.value)}
+                      disabled={isSuggestingPersonas}
+                      placeholder={`Persona ${conf.label} (gaya bicara / sudut pandang). Kosong = default AI.`}
+                      rows={2}
+                      className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none disabled:cursor-not-allowed"
+                    />
                   </div>
                 );
               })}

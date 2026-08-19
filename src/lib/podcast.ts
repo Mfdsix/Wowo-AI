@@ -4,6 +4,9 @@ export type Speaker = "host" | "guestA" | "guestB";
 
 export interface PodcastConfig {
   names: Record<Speaker, string>;
+  // Persona tiap speaker — EDITABLE oleh user setelah AI generate.
+  // Kalau kosong (""), model pakai PERSONAS default di bawah.
+  personas: Record<Speaker, string>;
   maxTurns: number;
 }
 
@@ -28,6 +31,7 @@ export function speakerAt(turnIndex: number): Speaker {
 
 export const DEFAULT_PODCAST_CONFIG: PodcastConfig = {
   names: { host: "Host", guestA: "Tamu A", guestB: "Tamu B" },
+  personas: { host: "", guestA: "", guestB: "" },
   maxTurns: 24,
 };
 
@@ -70,13 +74,29 @@ const RULES = `ATURAN (WAJIB PATUH):
 - Host: arahkan ke tamu biar mereka cerita. Tamu: tanggapi lalu kembangin dengan contoh.
 - Kalau ada [CATATAN PRODUSER] di pesan user: lempar topiknya secara natural ke ucapan, tanpa nyebut kata "produser".`;
 
+// Ambil persona tiap speaker: pakai nilai dari config kalau diisi user,
+// kalau kosong → fallback ke PERSONAS default (biar model gak dapet prompt
+// deskripsi kosong). PERSONAS tetap jadi cadangan saat persona gak diedit.
+export function resolvePersonas(
+  personas?: Record<Speaker, string> | null
+): Record<Speaker, string> {
+  const out = {} as Record<Speaker, string>;
+  for (const s of SPEAKER_ORDER) {
+    const v = personas?.[s];
+    out[s] = v && !isPlaceholderValue(v) ? v.trim() : PERSONAS[s];
+  }
+  return out;
+}
+
 export function buildPodcastSystemPrompt(
   speaker: Speaker,
   names: Record<Speaker, string>,
-  topic: string
+  topic: string,
+  personas?: Record<Speaker, string> | null
 ): string {
+  const resolved = resolvePersonas(personas);
   const all = SPEAKER_ORDER.map(
-    (s) => `- ${names[s]}: ${PERSONAS[s]}`
+    (s) => `- ${names[s]}: ${resolved[s]}`
   ).join("\n");
   return [
     "Kamu adalah pembicara dalam talkshow radio Indonesia yang LIVE.",

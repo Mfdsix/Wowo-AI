@@ -503,6 +503,10 @@ export default function Home() {
                 ...DEFAULT_PODCAST_CONFIG.names,
                 ...(parsed.names ?? {}),
               },
+              personas: {
+                ...DEFAULT_PODCAST_CONFIG.personas,
+                ...(parsed.personas ?? {}),
+              },
               maxTurns: parsed.maxTurns ?? DEFAULT_PODCAST_CONFIG.maxTurns,
             };
           } catch {
@@ -1064,6 +1068,7 @@ export default function Home() {
             history,
             note: note || undefined,
             names: podcastConfigRef.current.names,
+            personas: podcastConfigRef.current.personas,
           }),
         });
       modelName = res.headers.get("x-llm-model");
@@ -1279,6 +1284,34 @@ export default function Home() {
   useEffect(() => {
     podcastNextTurnRef.current = podcastNextTurn;
   }, [podcastNextTurn]);
+
+  // User ngedit persona tiap speaker di setup view → simpan ke config lokal
+  // (biar ikut ke-bawa pas "Mulai Sesi") + PATCH ke session kalau session
+  // podcast-nya udah ada (edit reload-safe).
+  const handlePodcastPersonasChange = useCallback(
+    (personas: Record<Speaker, string>) => {
+      const cfg: PodcastConfig = {
+        ...podcastConfigRef.current,
+        personas,
+      };
+      podcastConfigRef.current = cfg;
+      setPodcastConfig(cfg);
+      podcastStateRef.current = { ...podcastStateRef.current, config: cfg };
+
+      const sid = activeSessionId;
+      const sess = sessions.find((s) => s.id === sid);
+      if (sess?.mode === "podcast" && sid) {
+        fetch(`/api/sessions/${sid}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ podcastConfig: JSON.stringify(cfg) }),
+        }).catch((err) =>
+          console.warn("[Podcast] persist personas failed:", err)
+        );
+      }
+    },
+    [activeSessionId, sessions]
+  );
 
   // Mulai podcast baru: bikin session mode podcast + simpan topik, lalu jalankan loop.
   const handleStartPodcast = useCallback(
@@ -2199,6 +2232,7 @@ export default function Home() {
             onReplay={handleReplayPodcast}
             onStop={handleStopPodcast}
             onResumeGesture={resumePodcastAudio}
+            onPersonasChange={handlePodcastPersonasChange}
           />
         ) : (
           <>

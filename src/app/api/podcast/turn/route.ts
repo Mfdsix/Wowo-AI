@@ -29,6 +29,7 @@ export async function POST(req: NextRequest) {
     history?: unknown;
     note?: unknown;
     names?: unknown;
+    personas?: unknown;
   };
   try {
     body = await req.json();
@@ -73,7 +74,18 @@ export async function POST(req: NextRequest) {
       : {}),
   };
 
-  const systemPrompt = buildPodcastSystemPrompt(speaker, names, topic);
+  // Persona speaker — dari request (EDITABLE user). Kosong → cadangan default
+  // di buildPodcastSystemPrompt (resolvePersonas).
+  const personas: Record<Speaker, string> = {
+    ...DEFAULT_PODCAST_CONFIG.personas,
+    ...(body.personas &&
+    typeof body.personas === "object" &&
+    !Array.isArray(body.personas)
+      ? (body.personas as Partial<Record<Speaker, string>>)
+      : {}),
+  };
+
+  const systemPrompt = buildPodcastSystemPrompt(speaker, names, topic, personas);
 
   const transcript = buildHistoryForModel(history, names);
   const userPrompt = [
