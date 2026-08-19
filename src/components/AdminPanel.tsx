@@ -67,6 +67,7 @@ export default function AdminPanel({
   const [error, setError] = useState<string | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
   const [ttsUsage, setTtsUsage] = useState<TtsUsage | null>(null);
+  const [ttsUsageLoading, setTtsUsageLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -88,11 +89,14 @@ export default function AdminPanel({
   }, []);
 
   const loadTtsUsage = useCallback(async () => {
+    setTtsUsageLoading(true);
     try {
       const res = await fetch("/api/admin/tts-usage");
       if (res.ok) setTtsUsage(await res.json());
     } catch {
       // abaikan — panel tetep jalan walau usage gagal
+    } finally {
+      setTtsUsageLoading(false);
     }
   }, []);
 
@@ -160,14 +164,14 @@ export default function AdminPanel({
           )}
         </div>
 
-        {/* TTS Usage (Google Cloud) — pantau sisa free tier + status cutoff */}
-        {ttsUsage && (
-          <div className="border-b border-zinc-800 px-5 py-3">
-            <div className="flex items-center gap-2 mb-2">
-              <AudioLines size={14} className="text-sky-400" />
-              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                TTS Usage (Google Cloud)
-              </span>
+        {/* TTS Usage (Google Cloud) — pantau batas free tier + current usage */}
+        <div className="border-b border-zinc-800 px-5 py-3">
+          <div className="flex items-center gap-2 mb-2">
+            <AudioLines size={14} className="text-sky-400" />
+            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+              TTS Usage (Google Cloud)
+            </span>
+            {ttsUsage && (
               <span
                 className={`ml-auto rounded px-2 py-0.5 text-[10px] font-bold uppercase ${
                   ttsUsage.provider === "google"
@@ -177,65 +181,92 @@ export default function AdminPanel({
               >
                 {ttsUsage.provider === "google" ? "Google (primary)" : "Edge (fallback)"}
               </span>
-            </div>
+            )}
+          </div>
 
-            {/* Progress bar: used / quota */}
-            <div className="h-2.5 w-full rounded-full bg-zinc-800 overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  ttsUsage.usedChars >= ttsUsage.cutoffChars
-                    ? "bg-red-500"
-                    : ttsUsage.usedChars >= ttsUsage.cutoffChars * 0.75
-                      ? "bg-amber-500"
-                      : "bg-emerald-500"
-                }`}
-                style={{
-                  width: `${Math.min(
+          {ttsUsageLoading && !ttsUsage ? (
+            <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+              <Loader2 size={13} className="animate-spin" /> Memuat usage TTS…
+            </div>
+          ) : ttsUsage ? (
+            <>
+              {/* Progress bar: used / quota */}
+              <div className="flex items-center justify-between mb-1 text-[11px]">
+                <span className="text-zinc-400">
+                  Pakai{" "}
+                  <span className="font-mono text-zinc-200">
+                    {formatNumber(ttsUsage.usedChars)}
+                  </span>{" "}
+                  / {formatNumber(ttsUsage.quotaChars)} char
+                </span>
+                <span className="font-mono text-zinc-300">
+                  {Math.min(
                     100,
                     (ttsUsage.usedChars / ttsUsage.quotaChars) * 100
-                  )}%`,
-                }}
-              />
-            </div>
-
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px] text-zinc-400">
-              <span>
-                Terpakai:{" "}
-                <span className="font-mono text-zinc-200">
-                  {formatNumber(ttsUsage.usedChars)}
-                </span>{" "}
-                char
-              </span>
-              <span>
-                Sisa free tier:{" "}
-                <span className="font-mono text-emerald-300">
-                  {formatNumber(ttsUsage.remainingChars)}
-                </span>{" "}
-                char
-              </span>
-              <span className="text-zinc-500">
-                Quota: {formatNumber(ttsUsage.quotaChars)}
-              </span>
-            </div>
-
-            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px]">
-              {ttsUsage.cutoffEnabled ? (
-                <span className="flex items-center gap-1 text-amber-300">
-                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                  CUTOFF AKTIF @ {formatNumber(ttsUsage.cutoffChars)} char → auto-fallback Edge
+                  ).toFixed(1)}%
                 </span>
-              ) : (
-                <span className="flex items-center gap-1 text-zinc-500">
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />
-                  Cutoff nonaktif
+              </div>
+              <div className="h-2.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    ttsUsage.usedChars >= ttsUsage.cutoffChars
+                      ? "bg-red-500"
+                      : ttsUsage.usedChars >= ttsUsage.cutoffChars * 0.75
+                        ? "bg-amber-500"
+                        : "bg-emerald-500"
+                  }`}
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      (ttsUsage.usedChars / ttsUsage.quotaChars) * 100
+                    )}%`,
+                  }}
+                />
+              </div>
+
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px] text-zinc-400">
+                <span>
+                  Terpakai:{" "}
+                  <span className="font-mono text-zinc-200">
+                    {formatNumber(ttsUsage.usedChars)}
+                  </span>{" "}
+                  char
                 </span>
-              )}
-              <span className="text-zinc-500">
-                Sync Google: {formatRelativeTime(ttsUsage.lastSyncedAt)}
-              </span>
-            </div>
-          </div>
-        )}
+                <span>
+                  Sisa free tier:{" "}
+                  <span className="font-mono text-emerald-300">
+                    {formatNumber(ttsUsage.remainingChars)}
+                  </span>{" "}
+                  char
+                </span>
+                <span className="text-zinc-500">
+                  Batas: {formatNumber(ttsUsage.quotaChars)}
+                </span>
+              </div>
+
+              <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px]">
+                {ttsUsage.cutoffEnabled ? (
+                  <span className="flex items-center gap-1 text-amber-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    CUTOFF AKTIF @ {formatNumber(ttsUsage.cutoffChars)} char → auto-fallback Edge
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-zinc-500">
+                    <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" />
+                    Cutoff nonaktif
+                  </span>
+                )}
+                <span className="text-zinc-500">
+                  Sync Google: {formatRelativeTime(ttsUsage.lastSyncedAt)}
+                </span>
+              </div>
+            </>
+          ) : (
+            <p className="text-[11px] text-zinc-600">
+              Gagal memuat usage TTS (periksa akses admin).
+            </p>
+          )}
+        </div>
 
         {/* List sesi */}
         <div className="flex-1 overflow-y-auto px-5 py-3">
