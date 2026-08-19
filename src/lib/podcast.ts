@@ -41,9 +41,11 @@ export const DEFAULT_PODCAST_CONFIG: PodcastConfig = {
 export const PODCAST_HISTORY_LIMIT = 12;
 
 // Mapping suara default (bahasa Indonesia).
-// Edge-TTS cuma punya 2 suara id-ID, jadi Tamu B (pria kedua) dibuat dari
-// Ardi yang dipitch-shift lebih dalam biar beda dari Host.
-export const DEFAULT_VOICES: Record<
+// - Edge-TTS: cuma 2 suara id-ID, jadi Tamu B (pria kedua) dibuat dari Ardi
+//   yang dipitch-shift lebih dalam biar beda dari Host.
+// - Google Cloud TTS (primary): pakai WaveNet id-ID (4 jt char gratis/bulan).
+//   Chirp 3 HD gak ada suara id-ID, jadi WaveNet yang dipakai.
+const EDGE_VOICES: Record<
   Speaker,
   { voice: string; pitchShift: number }
 > = {
@@ -52,8 +54,23 @@ export const DEFAULT_VOICES: Record<
   guestB: { voice: "id-ID-ArdiNeural", pitchShift: -2 },
 };
 
+const GOOGLE_VOICES: Record<
+  Speaker,
+  { voice: string; pitchShift: number }
+> = {
+  host: { voice: "id-ID-Wavenet-A", pitchShift: 0 }, // wanita
+  guestA: { voice: "id-ID-Wavenet-C", pitchShift: 0 }, // wanita
+  guestB: { voice: "id-ID-Wavenet-B", pitchShift: 0 }, // pria
+};
+
 export function voiceFor(speaker: Speaker): { voice: string; pitchShift: number } {
-  return DEFAULT_VOICES[speaker];
+  // Import dinamis di-hindari di modul ini; cek env langsung (sama dg
+  // getTtsProvider di tts.ts) biar mapping suara konsisten sama provider.
+  const forced = process.env.TTS_PROVIDER?.trim().toLowerCase();
+  const isGoogle =
+    forced === "google" ||
+    (forced !== "edge" && !!process.env.GOOGLE_TTS_API_KEY?.trim());
+  return (isGoogle ? GOOGLE_VOICES : EDGE_VOICES)[speaker];
 }
 
 // Persona tiap speaker — dibuat PENDEK supaya model lemah gak nge-echo
